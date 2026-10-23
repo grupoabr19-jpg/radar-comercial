@@ -28,7 +28,7 @@ const routeStops = [
   {time:'14:30',name:'Metalúrgica União',desc:'Visita agendada · 45 min',city:'Hortolândia',state:'SP'}
 ];
 
-const state = {selected:'metalforte',view:'overview',regions:[],regionFilter:null};
+const state = {selected:'metalforte',view:'overview',regions:[],regionFilter:null,userLocation:null,nearbyProspectIds:[]};
 const $ = (s,root=document)=>root.querySelector(s);
 const $$ = (s,root=document)=>[...root.querySelectorAll(s)];
 
@@ -57,6 +57,22 @@ function whatsappRouteUrl(){const lines=['Rota comercial programada','','Abra ca
 async function loadRegions(){
   const radius=Number($('#regionRadius')?.value||50);$('#regionRadiusValue').textContent=`${radius} km`;
   try{state.regions=await api(`/api/regions?radiusKm=${radius}`);renderRegions()}catch(error){state.regions=[];renderRegions()}
+}
+function setLocationStatus(title,message,active=false){$('#locationTitle').textContent=title;$('#locationStatus').textContent=message;$('.location-bar').classList.toggle('active',active)}
+function geolocationError(error){
+  const messages={1:'Permissão de localização negada. Libere o acesso nas configurações do navegador.',2:'O dispositivo não conseguiu determinar a localização.',3:'A localização demorou demais para responder.'};
+  setLocationStatus('Não foi possível localizar',messages[error.code]||'Falha ao obter a localização.');showToast(messages[error.code]||'Falha de geolocalização')
+}
+function useGeolocation(){
+  if(!window.isSecureContext){setLocationStatus('Conexão segura necessária','A geolocalização funciona somente em HTTPS ou localhost.');return}
+  if(!navigator.geolocation){setLocationStatus('Recurso indisponível','Este navegador não oferece geolocalização.');return}
+  setLocationStatus('Obtendo localização…','Confirme a permissão solicitada pelo navegador.');
+  navigator.geolocation.getCurrentPosition(async position=>{
+    const {latitude,longitude,accuracy}=position.coords;state.userLocation={latitude,longitude,accuracy,capturedAt:new Date()};
+    setLocationStatus('Localização ativa',`Precisão aproximada de ${Math.round(accuracy)} m · atualizada agora`,true);
+    const button=$('#nearbyProspectsButton');button.disabled=true;button.textContent='Buscando prospects…';
+    try{const radius=Number($('#regionRadius')?.value||50);const nearby=await api(`/api/prospects/nearby?lat=${latitude}&lng=${longitude}&radiusKm=${radius}`);state.nearbyProspectIds=nearby.map(item=>item.id);button.disabled=false;button.textContent=`Ver ${nearby.length} prospects próximos`;showToast(`Localização atualizada: ${nearby.length} prospects no raio`)}catch(error){button.textContent='Ver prospects próximos';setLocationStatus('Localização ativa',`Posição obtida, mas a busca falhou: ${error.message}`,true)}
+  },geolocationError,{enableHighAccuracy:true,timeout:12000,maximumAge:300000});
 }
 function renderRegions(){
   const select=$('#regionSelect');if(!select)return;const previous=select.value;
@@ -136,8 +152,10 @@ document.addEventListener('click',e=>{
   else if(action==='add-to-route'){showToast('Prospect adicionado à rota de sexta-feira')}
   else if(action==='optimize-route'){e.target.closest('button').innerHTML='<svg><use href="#icon-check"></use></svg>Rota otimizada';showToast('Melhor sequência calculada: 18 min de desvio')}
   else if(action==='share-whatsapp'){window.open(whatsappRouteUrl(),'_blank','noopener')}
+  else if(action==='use-geolocation')useGeolocation()
+  else if(action==='view-nearby-prospects'){if(!state.userLocation){showToast('Ative sua localização primeiro');return}state.regionFilter=state.nearbyProspectIds;setView('prospects');renderProspects();showToast(`${state.nearbyProspectIds.length} prospects próximos da sua posição`)}
   else if(action==='view-region-prospects'){const region=state.regions.find(item=>item.id===$('#regionSelect').value)||state.regions[0];if(!region){showToast('Importe a planilha de rotas primeiro');return}state.regionFilter=region.prospectIds||[];setView('prospects');renderProspects();showToast(`${region.prospectCount||0} prospects no raio selecionado`)}
-  else if(action==='clear-region-filter'){state.regionFilter=null;renderProspects();showToast('Filtro de região removido')}
+  else if(action==='clear-region-filter'){state.regionFilter=null;renderProspects();showToast('Filtro geográfico removido')}
   else if(action==='add-route-stop'){setView('prospects');showToast('Escolha um prospect para adicionar à rota')}
   else if(action==='view-popup-prospect'){setView('prospects');renderProspects()}
   else if(action==='edit-route')openModal(territoryModal().replace('Território do piloto','Restrições da rota').replace('COBERTURA COMERCIAL','PLANEJAMENTO'));

@@ -83,6 +83,31 @@ app.get('/api/prospects', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get('/api/prospects/nearby', async (req, res, next) => {
+  try {
+    const latitude = Number(req.query.lat), longitude = Number(req.query.lng);
+    const requestedRadius = Number(req.query.radiusKm || 50);
+    const radiusKm = Math.min(250, Math.max(1, Number.isFinite(requestedRadius) ? requestedRadius : 50));
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      return res.status(400).json({ error: 'Coordenadas inválidas.' });
+    }
+    const result = await query(`WITH located AS (
+      SELECT id, company_name, trade_name, cnpj, segment, city, state, address, status, priority,
+        score, confidence, potential_min, potential_max, product_families, score_reasons,
+        6371 * acos(least(1, greatest(-1,
+          cos(radians($1)) * cos(radians(latitude::double precision)) *
+          cos(radians(longitude::double precision) - radians($2)) +
+          sin(radians($1)) * sin(radians(latitude::double precision))
+        ))) AS distance_km
+      FROM prospects
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+        AND status NOT IN ('won','lost','do_not_contact')
+    ) SELECT * FROM located WHERE distance_km <= $3 ORDER BY distance_km, score DESC LIMIT 500`,
+    [latitude, longitude, radiusKm]);
+    res.json(result.rows);
+  } catch (error) { next(error); }
+});
+
 app.post('/api/prospects', async (req, res, next) => {
   try {
     const { companyName, cnpj, segment, city, state, priority = 'medium', notes } = req.body;

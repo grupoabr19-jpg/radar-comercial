@@ -34,3 +34,9 @@ O seletor de raio mostra:
 - quantidade de prospects encontrados nessas cidades ou geograficamente dentro do raio.
 
 O Waze aceita somente um destino por deep link. Por isso, uma rota com várias visitas é compartilhada como uma sequência numerada de links: cada parada possui **Abrir no Waze**, e o botão de WhatsApp envia o roteiro completo com um link por trecho. Coordenadas são usadas preferencialmente; na ausência delas, o sistema envia o endereço para pesquisa no Waze.
+
+## Geolocalização do vendedor
+
+Na tela **Planejar rota**, o botão **Usar minha localização** solicita ao navegador a posição atual do dispositivo. A aplicação usa latitude e longitude somente para consultar prospects no raio selecionado; a posição do vendedor não é armazenada no banco e não há rastreamento contínuo.
+
+O recurso exige HTTPS (ou `localhost`) e permissão explícita do usuário. Para que a busca retorne resultados, os prospects também precisam estar geocodificados, com latitude e longitude. O Waze utiliza a posição atual do dispositivo como origem e cada visita compartilhada como destino.

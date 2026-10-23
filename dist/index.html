@@ -114,7 +114,7 @@
             <label class="filter-search"><svg><use href="#icon-search"></use></svg><input id="prospectSearch" placeholder="Buscar na fila"></label>
             <select id="segmentFilter" aria-label="Filtrar por segmento"><option value="all">Todos os segmentos</option><option>Serralheria</option><option>Estruturas metálicas</option><option>Coberturas</option><option>Construção</option></select>
             <select id="priorityFilter" aria-label="Filtrar por prioridade"><option value="all">Toda prioridade</option><option value="high">Alta prioridade</option><option value="medium">Média prioridade</option><option value="low">Baixa prioridade</option></select>
-            <button class="filter-button" id="clearRegionFilter" data-action="clear-region-filter" style="display:none">Limpar região</button>
+            <button class="filter-button" id="clearRegionFilter" data-action="clear-region-filter" style="display:none">Limpar área</button>
             <button class="filter-button" data-action="open-filters"><svg><use href="#icon-sliders"></use></svg>Mais filtros</button>
           </div>
           <div class="prospects-layout">
@@ -129,6 +129,11 @@
 
         <section class="view" id="routesView">
           <div class="page-intro compact-intro"><div><p class="eyebrow">PLANEJAMENTO INTELIGENTE</p><h1>Rota de sexta-feira</h1><p>Campinas • Eixo Norte · saída às 08:00</p></div><div class="route-actions"><button class="secondary-button" data-action="share-whatsapp">Enviar no WhatsApp</button><button class="secondary-button" data-action="edit-route">Editar restrições</button><button class="primary-button" data-action="optimize-route"><svg><use href="#icon-spark"></use></svg>Otimizar rota</button></div></div>
+          <article class="panel location-bar">
+            <div class="location-symbol"><svg><use href="#icon-focus"></use></svg></div>
+            <div><span class="eyebrow">LOCALIZAÇÃO DO DISPOSITIVO</span><h2 id="locationTitle">Localização desativada</h2><p id="locationStatus">Ative somente quando quiser encontrar prospects próximos. A posição não é armazenada.</p></div>
+            <div class="location-actions"><button class="secondary-button" data-action="use-geolocation">Usar minha localização</button><button class="primary-button" data-action="view-nearby-prospects" disabled id="nearbyProspectsButton">Ver prospects próximos</button></div>
+          </article>
           <article class="panel region-explorer">
             <div><span class="eyebrow">ÁREA DE PROSPECÇÃO</span><h2>Região e cidades da rota</h2><p id="regionHelp">Importe a planilha de rotas para criar cidades-polo automaticamente.</p><button class="region-prospects-button" data-action="view-region-prospects">Ver prospects deste raio</button></div>
             <label>Região<select id="regionSelect"><option value="">Nenhuma região importada</option></select></label>
