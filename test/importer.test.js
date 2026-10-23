@@ -15,14 +15,14 @@ test('detecta cabeçalho e usa a última aba por padrão', async () => {
   sheet.addRow(['Relatório comercial']);
   sheet.addRow([]);
   sheet.addRow(['Código Cliente', 'Razão Social', 'CNPJ', 'Cidade', 'UF']);
-  sheet.addRow([123, 'Metal Teste Ltda', '12.345.678/0001-90', 'Campinas', 'sp']);
+  sheet.addRow([123, 'Metal Teste Ltda', '11.222.333/0001-81', 'Campinas', 'sp']);
   const buffer = await workbook.xlsx.writeBuffer();
   const parsed = await parseWorkbook(buffer);
   assert.equal(parsed.sheetName, 'Rotas');
   assert.equal(parsed.headerRow, 3);
   assert.deepEqual(parsed.detectedFields, ['customerCode', 'companyName', 'cnpj', 'city', 'state']);
   assert.deepEqual(parsed.rows[0].normalized, {
-    customerCode: '123', companyName: 'Metal Teste Ltda', cnpj: '12345678000190', city: 'Campinas', state: 'SP',
+    customerCode: '123', companyName: 'Metal Teste Ltda', cnpj: '11222333000181', city: 'Campinas', state: 'SP',
   });
 });
 
@@ -42,18 +42,27 @@ test('reconhece a aba Base de clientes e extrai cidade e UF do endereço', async
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Base de clientes');
   sheet.addRow(['Código do cliente', 'CNPJ', 'CEP', 'Endereço']);
-  sheet.addRow(['C020098', '16.880.152/0001-66', '37834-686', 'ANGELA CRISTINA BENEDETTI, 203 - POLO DA MODA - Guaxupé/MG']);
+  sheet.addRow(['C020098', '11.222.333/0001-81', '37834-686', 'ANGELA CRISTINA BENEDETTI, 203 - POLO DA MODA - Guaxupé/MG']);
   const parsed = await parseWorkbook(await workbook.xlsx.writeBuffer(), 'Base de clientes');
   assert.deepEqual(parsed.detectedFields, ['customerCode', 'cnpj', 'postalCode', 'address']);
   assert.deepEqual(parsed.rows[0].normalized, {
     customerCode: 'C020098',
-    cnpj: '16880152000166',
+    cnpj: '11222333000181',
     postalCode: '37834-686',
     address: 'ANGELA CRISTINA BENEDETTI, 203 - POLO DA MODA - Guaxupé/MG',
     city: 'Guaxupé',
     state: 'MG',
     companyName: 'Cliente C020098',
   });
+});
+
+test('recusa CNPJ com dígitos verificadores inválidos', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Base de clientes');
+  sheet.addRow(['Código do cliente', 'CNPJ']);
+  sheet.addRow(['C1', '11.222.333/0001-82']);
+  const parsed = await parseWorkbook(await workbook.xlsx.writeBuffer());
+  assert.equal(parsed.rows[0].normalized.cnpj, null);
 });
 
 test('reconhece região, cidade-polo e coordenadas da planilha de rotas', async () => {

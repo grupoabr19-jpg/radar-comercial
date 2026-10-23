@@ -70,7 +70,19 @@ function findHeaderRow(worksheet) {
 
 function normalizeDocument(value) {
   const digits = textValue(value).replace(/\D/g, '');
-  return digits.length === 14 ? digits : null;
+  if (digits.length !== 14 || /^(\d)\1+$/.test(digits)) return null;
+  const digit = (length) => {
+    let sum = 0;
+    let weight = length - 7;
+    for (let index = 0; index < length; index += 1) {
+      sum += Number(digits[index]) * weight;
+      weight -= 1;
+      if (weight === 1) weight = 9;
+    }
+    const remainder = sum % 11;
+    return remainder < 2 ? 0 : 11 - remainder;
+  };
+  return digit(12) === Number(digits[12]) && digit(13) === Number(digits[13]) ? digits : null;
 }
 
 function normalizeNumber(value) {
@@ -269,9 +281,16 @@ export async function persistImport(client, { sourceType, fileName, requestedShe
     [sourceType, fileName, parsed.sheetName, JSON.stringify(parsed.detectedFields), actorEmail]);
     const batchId = created.rows[0].id;
     let accepted = 0, rejected = 0, duplicate = 0;
+    const seenCustomerDocuments = new Set();
     for (const item of parsed.rows) {
       const notes = validateRow(sourceType, item.normalized);
       let status = notes.length ? 'rejected' : 'accepted';
+      if (!notes.length && sourceType === 'erp' && item.normalized.cnpj && seenCustomerDocuments.has(item.normalized.cnpj)) {
+        status = 'duplicate';
+        notes.push('CNPJ repetido nesta carga');
+        duplicate += 1;
+      }
+      if (sourceType === 'erp' && item.normalized.cnpj) seenCustomerDocuments.add(item.normalized.cnpj);
       if (!notes.length && sourceType === 'erp') await upsertCustomer(client, item.normalized, batchId);
       if (!notes.length && sourceType === 'candidates') {
         if (await isExistingCustomer(client, item.normalized)) {
