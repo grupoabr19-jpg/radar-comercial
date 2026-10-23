@@ -262,6 +262,7 @@ app.get('/api/routes/:routeId/navigation', async (req, res, next) => {
 app.get('/login.html', (_req, res) => res.sendFile(path.join(root, 'dist', 'login.html')));
 app.get('/login.js', (_req, res) => res.sendFile(path.join(root, 'dist', 'login.js')));
 app.get('/styles.css', (_req, res) => res.sendFile(path.join(root, 'dist', 'styles.css')));
+app.get('/assets/logo-grupo-abr-branca.svg', (_req, res) => res.sendFile(path.join(root, 'dist', 'assets', 'logo-grupo-abr-branca.svg')));
 app.get('/', requirePageAuth, (_req, res) => res.sendFile(path.join(root, 'dist', 'index.html')));
 app.use(requirePageAuth, express.static(path.join(root, 'dist'), { index: false, maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0 }));
 
