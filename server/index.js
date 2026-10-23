@@ -8,6 +8,7 @@ import { clearSessionCookie, createSession, readSession, requireApiAuth, require
 import { getPool, query } from './db.js';
 import { migrate } from './migrate.js';
 import { parseWorkbook, persistImport } from './importer.js';
+import { buildRouteShare, buildWazeUrl, haversineKm } from './navigation.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const app = express();
@@ -140,6 +141,92 @@ app.get('/api/imports', async (_req, res, next) => {
       total_rows, accepted_rows, rejected_rows, detected_fields, created_by, created_at, completed_at
       FROM import_batches ORDER BY created_at DESC LIMIT 50`);
     res.json(result.rows);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/regions', async (req, res, next) => {
+  try {
+    const requestedRadius = Number(req.query.radiusKm || 50);
+    const radiusKm = Math.min(500, Math.max(1, Number.isFinite(requestedRadius) ? requestedRadius : 50));
+    const [regionsResult, citiesResult, municipalitiesResult, prospectsResult] = await Promise.all([
+      query(`SELECT id, name, hub_city, hub_state, hub_latitude, hub_longitude, default_radius_km
+        FROM route_regions ORDER BY name`),
+      query(`SELECT region_id, city_key, city, state, latitude, longitude, distance_from_hub_km
+        FROM region_cities ORDER BY city`),
+      query(`SELECT city_key, city, state, latitude, longitude FROM municipalities
+        WHERE latitude IS NOT NULL AND longitude IS NOT NULL`),
+      query(`SELECT id, company_name, city, state, latitude, longitude FROM prospects
+        WHERE status NOT IN ('won','lost','do_not_contact')`),
+    ]);
+    const regions = regionsResult.rows.map((region) => {
+      const found = new Map();
+      for (const city of citiesResult.rows.filter((item) => item.region_id === region.id)) {
+        const distance = city.distance_from_hub_km == null ? null : Number(city.distance_from_hub_km);
+        if (distance == null || distance <= radiusKm) found.set(`${city.city_key}|${city.state}`, { ...city, distanceKm: distance, source: 'route' });
+      }
+      for (const city of municipalitiesResult.rows) {
+        const distance = haversineKm(region.hub_latitude, region.hub_longitude, city.latitude, city.longitude);
+        if (distance != null && distance <= radiusKm) {
+          const key = `${city.city_key}|${city.state}`;
+          if (!found.has(key)) found.set(key, { ...city, distanceKm: Number(distance.toFixed(1)), source: 'radius' });
+        }
+      }
+      const normalizedCity = (value = '') => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const matchingProspects = prospectsResult.rows.filter((prospect) => {
+        const key = `${normalizedCity(prospect.city)}|${prospect.state}`;
+        if (found.has(key)) return true;
+        const distance = haversineKm(region.hub_latitude, region.hub_longitude, prospect.latitude, prospect.longitude);
+        return distance != null && distance <= radiusKm;
+      });
+      return {
+        id: region.id, name: region.name, hubCity: region.hub_city, hubState: region.hub_state,
+        hubLatitude: region.hub_latitude, hubLongitude: region.hub_longitude,
+        defaultRadiusKm: region.default_radius_km, radiusKm,
+        canExpandByRadius: region.hub_latitude != null && region.hub_longitude != null,
+        prospectCount: matchingProspects.length,
+        prospectIds: matchingProspects.slice(0, 500).map((prospect) => prospect.id),
+        cities: [...found.values()].sort((a, b) => (a.distanceKm ?? 9999) - (b.distanceKm ?? 9999) || a.city.localeCompare(b.city)),
+      };
+    });
+    res.json(regions);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/routes', async (req, res, next) => {
+  const client = await getPool().connect();
+  try {
+    const { name, routeDate, sellerName, regionId, stops = [] } = req.body;
+    if (!name || !routeDate || !Array.isArray(stops) || !stops.length) return res.status(400).json({ error: 'Nome, data e ao menos uma parada são obrigatórios.' });
+    if (stops.length > 50) return res.status(400).json({ error: 'Uma rota pode ter no máximo 50 paradas.' });
+    await client.query('BEGIN');
+    const route = await client.query(`INSERT INTO planned_routes
+      (name, route_date, seller_name, region_id, status, created_by)
+      VALUES ($1,$2,$3,$4,'ready',$5) RETURNING *`, [name, routeDate, sellerName, regionId || null, req.user.email]);
+    for (const [index, stop] of stops.entries()) {
+      if (!stop.companyName) throw new Error(`A parada ${index + 1} não possui empresa.`);
+      await client.query(`INSERT INTO route_stops
+        (route_id, sequence_number, prospect_id, company_name, address, city, state, latitude, longitude, appointment_at, planned_duration_minutes, notes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [
+        route.rows[0].id, index + 1, stop.prospectId || null, stop.companyName, stop.address,
+        stop.city, stop.state, stop.latitude, stop.longitude, stop.appointmentAt || null,
+        stop.plannedDurationMinutes || 30, stop.notes,
+      ]);
+    }
+    await client.query('COMMIT');
+    res.status(201).json({ id: route.rows[0].id });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(error);
+  } finally { client.release(); }
+});
+
+app.get('/api/routes/:routeId/navigation', async (req, res, next) => {
+  try {
+    const routeResult = await query('SELECT * FROM planned_routes WHERE id=$1', [req.params.routeId]);
+    if (!routeResult.rowCount) return res.status(404).json({ error: 'Rota não encontrada.' });
+    const stopsResult = await query(`SELECT * FROM route_stops WHERE route_id=$1 ORDER BY sequence_number`, [req.params.routeId]);
+    const stops = stopsResult.rows.map((stop) => ({ ...stop, wazeUrl: buildWazeUrl(stop) }));
+    res.json({ route: routeResult.rows[0], stops, ...buildRouteShare(routeResult.rows[0], stops) });
   } catch (error) { next(error); }
 });
 

@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import { haversineKm } from './navigation.js';
 
 const aliases = {
   customerCode: ['codigo', 'cod cliente', 'codigo cliente', 'cliente', 'codcli', 'cod'],
@@ -23,6 +24,11 @@ const aliases = {
   externalKey: ['id externo', 'codigo externo', 'id empresa'],
   potentialMin: ['potencial minimo', 'potencial min'],
   potentialMax: ['potencial maximo', 'potencial max'],
+  latitude: ['latitude', 'lat'],
+  longitude: ['longitude', 'lon', 'lng'],
+  routeName: ['rota', 'nome rota', 'nome da rota', 'roteiro'],
+  hubCity: ['cidade polo', 'cidade base', 'polo'],
+  distanceFromHubKm: ['distancia do polo km', 'distancia polo', 'raio km', 'distancia km'],
 };
 
 function textValue(value) {
@@ -85,7 +91,7 @@ function normalizeRow(raw, mapping) {
   if (normalized.state) normalized.state = textValue(normalized.state).slice(0, 2).toUpperCase();
   if (normalized.customerCode) normalized.customerCode = textValue(normalized.customerCode);
   if (normalized.customerCreatedAt) normalized.customerCreatedAt = textValue(normalized.customerCreatedAt).slice(0, 10);
-  for (const field of ['creditLimit', 'daysSinceLastSale', 'potentialMin', 'potentialMax']) {
+  for (const field of ['creditLimit', 'daysSinceLastSale', 'potentialMin', 'potentialMax', 'latitude', 'longitude', 'distanceFromHubKm']) {
     if (normalized[field] != null) normalized[field] = normalizeNumber(normalized[field]);
   }
   return normalized;
@@ -119,7 +125,8 @@ export async function parseWorkbook(buffer, requestedSheet) {
 
 function validateRow(sourceType, row) {
   const notes = [];
-  if (!row.companyName) notes.push('Nome da empresa ausente');
+  if (sourceType !== 'routes' && !row.companyName) notes.push('Nome da empresa ausente');
+  if (sourceType === 'routes' && !row.city) notes.push('Cidade da rota ausente');
   if (sourceType === 'erp' && !row.customerCode) notes.push('Código do cliente ausente');
   if (row.cnpj == null && Object.hasOwn(row, 'cnpj')) notes.push('CNPJ inválido');
   return notes;
@@ -166,19 +173,78 @@ async function upsertCustomer(client, row, batchId) {
 async function upsertProspect(client, row, batchId) {
   await client.query(`INSERT INTO prospects (
       external_key, cnpj, company_name, trade_name, segment, city, state, postal_code,
-      address, potential_min, potential_max, source_name, source_batch_id,
+      address, latitude, longitude, potential_min, potential_max, source_name, source_batch_id,
       score_reasons, confidence, status
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'planilha de candidatos',$12,$13,45,'review')
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'planilha de candidatos',$14,$15,45,'review')
     ON CONFLICT (cnpj) WHERE cnpj IS NOT NULL DO UPDATE SET
       company_name = EXCLUDED.company_name, trade_name = EXCLUDED.trade_name,
       segment = EXCLUDED.segment, city = EXCLUDED.city, state = EXCLUDED.state,
       postal_code = EXCLUDED.postal_code, address = EXCLUDED.address,
+      latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude,
       potential_min = EXCLUDED.potential_min, potential_max = EXCLUDED.potential_max,
       source_batch_id = EXCLUDED.source_batch_id, updated_at = now()`, [
     row.externalKey, row.cnpj, row.companyName, row.tradeName, row.segment, row.city,
-    row.state, row.postalCode, row.address, row.potentialMin, row.potentialMax, batchId,
+    row.state, row.postalCode, row.address, row.latitude, row.longitude,
+    row.potentialMin, row.potentialMax, batchId,
     JSON.stringify(['Importado de fonte externa', 'Aguardando validação comercial']),
   ]);
+}
+
+function cityKey(value = '') {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+async function upsertMunicipality(client, row, sourceName) {
+  if (!row.city || !row.state) return;
+  await client.query(`INSERT INTO municipalities
+    (city_key, city, state, latitude, longitude, source_name)
+    VALUES ($1,$2,$3,$4,$5,$6)
+    ON CONFLICT (city_key, state) DO UPDATE SET
+      city=EXCLUDED.city, latitude=coalesce(EXCLUDED.latitude, municipalities.latitude),
+      longitude=coalesce(EXCLUDED.longitude, municipalities.longitude),
+      source_name=EXCLUDED.source_name, updated_at=now()`,
+  [cityKey(row.city), row.city, row.state, row.latitude, row.longitude, sourceName]);
+}
+
+async function syncRouteRegions(client, rows, batchId) {
+  const groups = new Map();
+  for (const item of rows) {
+    const row = item.normalized;
+    if (!row.city || !row.state) continue;
+    const name = row.routeName || row.regionName || `${row.city} - ${row.state}`;
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(row);
+  }
+  for (const [name, entries] of groups) {
+    const counts = new Map();
+    for (const row of entries) {
+      const key = `${cityKey(row.city)}|${row.state}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const explicitHub = entries.find((row) => row.hubCity && cityKey(row.hubCity) === cityKey(row.city));
+    const hub = explicitHub || [...entries].sort((a, b) => counts.get(`${cityKey(b.city)}|${b.state}`) - counts.get(`${cityKey(a.city)}|${a.state}`))[0];
+    const region = await client.query(`INSERT INTO route_regions
+      (name, hub_city, hub_state, hub_latitude, hub_longitude, source_batch_id)
+      VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (name) DO UPDATE SET hub_city=EXCLUDED.hub_city, hub_state=EXCLUDED.hub_state,
+        hub_latitude=coalesce(EXCLUDED.hub_latitude, route_regions.hub_latitude),
+        hub_longitude=coalesce(EXCLUDED.hub_longitude, route_regions.hub_longitude),
+        source_batch_id=EXCLUDED.source_batch_id, updated_at=now()
+      RETURNING id`, [name, hub.city, hub.state, hub.latitude, hub.longitude, batchId]);
+    const uniqueCities = new Map(entries.map((row) => [`${cityKey(row.city)}|${row.state}`, row]));
+    for (const row of uniqueCities.values()) {
+      const calculated = haversineKm(hub.latitude, hub.longitude, row.latitude, row.longitude);
+      const distance = row.distanceFromHubKm ?? calculated ?? (cityKey(row.city) === cityKey(hub.city) ? 0 : null);
+      await client.query(`INSERT INTO region_cities
+        (region_id, city_key, city, state, latitude, longitude, distance_from_hub_km)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        ON CONFLICT (region_id, city_key, state) DO UPDATE SET city=EXCLUDED.city,
+          latitude=coalesce(EXCLUDED.latitude, region_cities.latitude),
+          longitude=coalesce(EXCLUDED.longitude, region_cities.longitude),
+          distance_from_hub_km=coalesce(EXCLUDED.distance_from_hub_km, region_cities.distance_from_hub_km), updated_at=now()`,
+      [region.rows[0].id, cityKey(row.city), row.city, row.state, row.latitude, row.longitude, distance]);
+    }
+  }
 }
 
 export async function persistImport(client, { sourceType, fileName, requestedSheet, parsed, actorEmail }) {
@@ -203,11 +269,18 @@ export async function persistImport(client, { sourceType, fileName, requestedShe
           await upsertProspect(client, item.normalized, batchId);
         }
       }
+      if (!notes.length && ['routes', 'candidates'].includes(sourceType)) {
+        await upsertMunicipality(client, item.normalized, sourceType);
+      }
       if (status === 'accepted') accepted += 1;
       if (status === 'rejected') rejected += 1;
       await client.query(`INSERT INTO import_rows
         (batch_id, row_number, raw_data, normalized_data, validation_status, validation_notes)
         VALUES ($1,$2,$3,$4,$5,$6)`, [batchId, item.rowNumber, item.raw, item.normalized, status, notes]);
+    }
+    if (sourceType === 'routes') {
+      const validRows = parsed.rows.filter((item) => !validateRow(sourceType, item.normalized).length);
+      await syncRouteRegions(client, validRows, batchId);
     }
     await client.query(`UPDATE import_batches SET status='completed', total_rows=$2,
       accepted_rows=$3, rejected_rows=$4, completed_at=now() WHERE id=$1`,

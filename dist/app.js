@@ -20,15 +20,15 @@ const demoVisits = [
 const visits = [];
 
 const routeStops = [
-  {time:'08:00',name:'Saída · Filial Campinas',desc:'Av. das Amoreiras, 1820'},
-  {time:'08:35',name:'Serralheria Horizonte',desc:'Visita agendada · 45 min'},
-  {time:'09:42',name:'Metalforte Estruturas',desc:'Prospecção sugerida · 30 min',prospect:true},
-  {time:'11:00',name:'Aço & Forma Industrial',desc:'Visita agendada · 50 min'},
-  {time:'13:25',name:'AçoCalhas Coberturas',desc:'Prospecção sugerida · 30 min',prospect:true},
-  {time:'14:30',name:'Metalúrgica União',desc:'Visita agendada · 45 min'}
+  {time:'08:00',name:'Saída · Filial Campinas',desc:'Av. das Amoreiras, 1820',address:'Av. das Amoreiras, 1820',city:'Campinas',state:'SP'},
+  {time:'08:35',name:'Serralheria Horizonte',desc:'Visita agendada · 45 min',city:'Campinas',state:'SP'},
+  {time:'09:42',name:'Metalforte Estruturas',desc:'Prospecção sugerida · 30 min',city:'Campinas',state:'SP',prospect:true},
+  {time:'11:00',name:'Aço & Forma Industrial',desc:'Visita agendada · 50 min',city:'Campinas',state:'SP'},
+  {time:'13:25',name:'AçoCalhas Coberturas',desc:'Prospecção sugerida · 30 min',city:'Sumaré',state:'SP',prospect:true},
+  {time:'14:30',name:'Metalúrgica União',desc:'Visita agendada · 45 min',city:'Hortolândia',state:'SP'}
 ];
 
-const state = {selected:'metalforte',view:'overview'};
+const state = {selected:'metalforte',view:'overview',regions:[],regionFilter:null};
 const $ = (s,root=document)=>root.querySelector(s);
 const $$ = (s,root=document)=>[...root.querySelectorAll(s)];
 
@@ -51,6 +51,22 @@ async function loadLiveData(){
     renderPriorities();renderProspects();renderVisits();
   }catch(error){prospects.splice(0,prospects.length);visits.splice(0,visits.length);renderPriorities();renderProspects();renderVisits();showToast(`Dados indisponíveis: ${error.message}`)}
 }
+
+function wazeUrl(stop){const params=new URLSearchParams({navigate:'yes',utm_source:'radar_comercial'});if(Number.isFinite(Number(stop.latitude))&&Number.isFinite(Number(stop.longitude))){params.set('ll',`${Number(stop.latitude)},${Number(stop.longitude)}`)}else{params.set('q',[stop.address,stop.city,stop.state].filter(Boolean).join(', '))}return `https://waze.com/ul?${params}`}
+function whatsappRouteUrl(){const lines=['Rota comercial programada','','Abra cada parada no Waze ao iniciar o próximo trecho:',''];routeStops.forEach((stop,index)=>lines.push(`${index+1}. ${stop.name}`,wazeUrl(stop),''));return `https://wa.me/?text=${encodeURIComponent(lines.join('\n').trim())}`}
+async function loadRegions(){
+  const radius=Number($('#regionRadius')?.value||50);$('#regionRadiusValue').textContent=`${radius} km`;
+  try{state.regions=await api(`/api/regions?radiusKm=${radius}`);renderRegions()}catch(error){state.regions=[];renderRegions()}
+}
+function renderRegions(){
+  const select=$('#regionSelect');if(!select)return;const previous=select.value;
+  select.innerHTML=state.regions.length?state.regions.map(region=>`<option value="${region.id}">${region.name} · polo ${region.hubCity}/${region.hubState}</option>`).join(''):'<option value="">Nenhuma região importada</option>';
+  if(state.regions.some(region=>region.id===previous))select.value=previous;
+  const region=state.regions.find(item=>item.id===select.value)||state.regions[0];
+  if(!region){$('#regionCities').innerHTML='<span class="city-pill muted">Aguardando planilha de rotas</span>';$('#regionHelp').textContent='Importe a planilha de rotas para criar cidades-polo automaticamente.';return}
+  const expansion=region.canExpandByRadius?'O raio inclui automaticamente outras cidades com coordenadas disponíveis.':'Adicione coordenadas para expansão automática do raio.';$('#regionHelp').textContent=`${region.prospectCount||0} prospects mapeados neste raio. ${expansion}`;
+  $('#regionCities').innerHTML=region.cities.length?region.cities.map(city=>`<span class="city-pill ${city.source==='radius'?'expanded':''}">${city.city}/${city.state}${city.distanceKm==null?'':` · ${Math.round(city.distanceKm)} km`}</span>`).join(''):'<span class="city-pill muted">Nenhuma cidade neste raio</span>';
+}
 function renderPriorities(){
   $('#priorityList').innerHTML=prospects.slice(0,5).map((p,i)=>`<div class="priority-item" data-select="${p.id}"><span class="priority-rank">0${i+1}</span><div><h3>${p.name}</h3><p>${p.segment} · ${p.city.split(' · ')[0]}</p></div><div class="priority-score" style="--score:${p.score}"><span>${p.score}</span></div></div>`).join('');
 }
@@ -59,9 +75,10 @@ function renderProspects(){
   const term=$('#prospectSearch').value.trim().toLowerCase();
   const segment=$('#segmentFilter').value;
   const priority=$('#priorityFilter').value;
-  const filtered=prospects.filter(p=>(!term||`${p.name} ${p.city} ${p.cnpj}`.toLowerCase().includes(term))&&(segment==='all'||p.segment===segment)&&(priority==='all'||p.priority===priority));
+  const filtered=prospects.filter(p=>(!state.regionFilter||state.regionFilter.includes(p.id))&&(!term||`${p.name} ${p.city} ${p.cnpj}`.toLowerCase().includes(term))&&(segment==='all'||p.segment===segment)&&(priority==='all'||p.priority===priority));
   $('#prospectRows').innerHTML=filtered.map(p=>`<div class="prospect-row ${p.id===state.selected?'selected':''}" data-select="${p.id}"><div class="company-cell"><span class="company-logo" style="background:${p.color}">${p.initials}</span><div><strong>${p.name}</strong><small>${p.segment} · ${p.city}</small></div></div><div class="fit-score">${p.score}%<small>${priorityLabel(p.priority)} prioridade</small></div><div class="potential-cell"><strong>${p.potential}</strong><small>estimativa orientativa</small></div><div class="distance">${p.distance}<small>${p.detour} de desvio</small></div><span class="status-chip ${p.priority}">${p.status}</span><button class="row-more" aria-label="Mais ações">•••</button></div>`).join('');
   $('#prospectEmpty').style.display=filtered.length?'none':'block';
+  $('#clearRegionFilter').style.display=state.regionFilter?'flex':'none';
   renderDetail();
 }
 
@@ -72,7 +89,7 @@ function renderDetail(){
 }
 
 function renderRoute(){
-  $('#routeStops').innerHTML=routeStops.map((s,i)=>`<div class="route-stop ${s.prospect?'prospect':''}"><span class="stop-index">${i+1}</span><div><h3>${s.name}</h3><p>${s.desc}</p></div><time>${s.time}</time>${s.prospect?'<span class="stop-tag">PROSPECT NO CAMINHO</span>':''}</div>`).join('');
+  $('#routeStops').innerHTML=routeStops.map((s,i)=>`<div class="route-stop ${s.prospect?'prospect':''}"><span class="stop-index">${i+1}</span><div><h3>${s.name}</h3><p>${s.desc}</p></div><time>${s.time}</time>${s.prospect?'<span class="stop-tag">PROSPECT NO CAMINHO</span>':''}<a class="waze-link" href="${wazeUrl(s)}" target="_blank" rel="noopener">Abrir no Waze</a></div>`).join('');
 }
 
 function renderVisits(term=''){
@@ -118,6 +135,9 @@ document.addEventListener('click',e=>{
   else if(action==='save-territory'){closeModal();showToast('Território salvo com sucesso')}
   else if(action==='add-to-route'){showToast('Prospect adicionado à rota de sexta-feira')}
   else if(action==='optimize-route'){e.target.closest('button').innerHTML='<svg><use href="#icon-check"></use></svg>Rota otimizada';showToast('Melhor sequência calculada: 18 min de desvio')}
+  else if(action==='share-whatsapp'){window.open(whatsappRouteUrl(),'_blank','noopener')}
+  else if(action==='view-region-prospects'){const region=state.regions.find(item=>item.id===$('#regionSelect').value)||state.regions[0];if(!region){showToast('Importe a planilha de rotas primeiro');return}state.regionFilter=region.prospectIds||[];setView('prospects');renderProspects();showToast(`${region.prospectCount||0} prospects no raio selecionado`)}
+  else if(action==='clear-region-filter'){state.regionFilter=null;renderProspects();showToast('Filtro de região removido')}
   else if(action==='add-route-stop'){setView('prospects');showToast('Escolha um prospect para adicionar à rota')}
   else if(action==='view-popup-prospect'){setView('prospects');renderProspects()}
   else if(action==='edit-route')openModal(territoryModal().replace('Território do piloto','Restrições da rota').replace('COBERTURA COMERCIAL','PLANEJAMENTO'));
@@ -142,8 +162,9 @@ document.addEventListener('submit',async e=>{
 
 $('#prospectSearch').addEventListener('input',renderProspects);$('#segmentFilter').addEventListener('change',renderProspects);$('#priorityFilter').addEventListener('change',renderProspects);$('#visitSearch').addEventListener('input',e=>renderVisits(e.target.value));
 $('#globalSearch').addEventListener('input',e=>{if(e.target.value){setView('prospects');$('#prospectSearch').value=e.target.value;renderProspects()}});
+$('#regionSelect').addEventListener('change',renderRegions);$('#regionRadius').addEventListener('input',()=>{$('#regionRadiusValue').textContent=`${$('#regionRadius').value} km`});$('#regionRadius').addEventListener('change',loadRegions);
 $('.mobile-menu').addEventListener('click',()=>$('.sidebar').classList.toggle('open'));
 $$('.period-picker button').forEach(b=>b.addEventListener('click',()=>{$$('.period-picker button').forEach(x=>x.classList.remove('active'));b.classList.add('active');showToast(`Período alterado para ${b.textContent}`)}));
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('#globalSearch').focus()}});
 
-renderPriorities();renderProspects();renderRoute();renderVisits();loadLiveData();
+renderPriorities();renderProspects();renderRoute();renderVisits();loadLiveData();loadRegions();

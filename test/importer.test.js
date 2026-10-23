@@ -38,3 +38,15 @@ test('reconhece cabeçalhos da base atual do ERP', async () => {
   assert.equal(parsed.rows[0].normalized.sellerType, 'Interno');
 });
 
+test('reconhece região, cidade-polo e coordenadas da planilha de rotas', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Mapa de rotas');
+  sheet.addRow(['Rota', 'Cidade Polo', 'Cidade', 'UF', 'Latitude', 'Longitude', 'Distância do Polo km']);
+  sheet.addRow(['Eixo Norte', 'Campinas', 'Campinas', 'SP', -22.9056, -47.0608, 0]);
+  sheet.addRow(['Eixo Norte', 'Campinas', 'Sumaré', 'SP', -22.8219, -47.2668, 24]);
+  const parsed = await parseWorkbook(await workbook.xlsx.writeBuffer());
+  assert.equal(parsed.rows[0].normalized.routeName, 'Eixo Norte');
+  assert.equal(parsed.rows[0].normalized.hubCity, 'Campinas');
+  assert.equal(parsed.rows[1].normalized.distanceFromHubKm, 24);
+});
+

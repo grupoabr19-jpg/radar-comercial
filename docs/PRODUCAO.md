@@ -22,3 +22,15 @@ Importar a base do ERP não “descobre” empresas novas. Para descoberta real 
 O Render precisa acessar um repositório GitHub, GitLab ou Bitbucket. Depois de criar/vincular o repositório, o Blueprint `render.yaml` cria o serviço e solicita as variáveis secretas. Na primeira inicialização, as migrações são aplicadas com trava transacional antes de o servidor aceitar tráfego.
 
 O plano gratuito no Blueprint serve para validação online e pode hibernar. Para operação contínua, altere `plan` depois de aprovar o custo mensal no Render.
+
+## Regiões, raio e Waze
+
+A carga do tipo **Rotas e visitas** reconhece, quando disponíveis, as colunas `Rota`, `Cidade Polo`, `Cidade`, `UF`, `Latitude`, `Longitude` e `Distância do Polo km`. Se a cidade-polo não estiver indicada, o sistema usa como polo a cidade mais frequente de cada rota/região.
+
+O seletor de raio mostra:
+
+- cidades explicitamente relacionadas à rota;
+- cidades adicionais com coordenadas conhecidas que estejam dentro do raio;
+- quantidade de prospects encontrados nessas cidades ou geograficamente dentro do raio.
+
+O Waze aceita somente um destino por deep link. Por isso, uma rota com várias visitas é compartilhada como uma sequência numerada de links: cada parada possui **Abrir no Waze**, e o botão de WhatsApp envia o roteiro completo com um link por trecho. Coordenadas são usadas preferencialmente; na ausência delas, o sistema envia o endereço para pesquisa no Waze.
