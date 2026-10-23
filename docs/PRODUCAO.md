@@ -9,6 +9,10 @@
 
 Importar a base do ERP não “descobre” empresas novas. Para descoberta real é necessária uma fonte externa de CNPJ/empresas, respeitando licença e finalidade. O sistema já recebe essa base por Excel; uma integração automática pode usar a mesma camada depois.
 
+A aba **Base de clientes** da planilha de planejamento pode ser importada como **Clientes do ERP**. O formato mínimo reconhecido é `Código do cliente`, `CNPJ`, `CEP` e `Endereço`; cidade e UF são extraídas do final do endereço quando estiver no padrão `Cidade/UF`. Se a razão social não estiver disponível, o cadastro recebe temporariamente `Cliente <código>` e continua servindo para bloquear duplicidades por CNPJ. A inclusão de `Nome do cliente` ou `Razão social` continua recomendada para identificação humana.
+
+O formulário aceita tanto um `.xlsx` quanto um link compartilhado do Google Sheets. Links são limitados ao domínio `docs.google.com`, exportados como Excel no momento da carga e sujeitos ao limite de 30 MB. A planilha precisa permitir leitura pelo link para que o servidor de produção consiga exportá-la.
+
 ## Variáveis do Render
 
 - `DATABASE_URL`: URL com pool do Neon, usada pela aplicação.

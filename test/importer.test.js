@@ -38,6 +38,24 @@ test('reconhece cabeçalhos da base atual do ERP', async () => {
   assert.equal(parsed.rows[0].normalized.sellerType, 'Interno');
 });
 
+test('reconhece a aba Base de clientes e extrai cidade e UF do endereço', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Base de clientes');
+  sheet.addRow(['Código do cliente', 'CNPJ', 'CEP', 'Endereço']);
+  sheet.addRow(['C020098', '16.880.152/0001-66', '37834-686', 'ANGELA CRISTINA BENEDETTI, 203 - POLO DA MODA - Guaxupé/MG']);
+  const parsed = await parseWorkbook(await workbook.xlsx.writeBuffer(), 'Base de clientes');
+  assert.deepEqual(parsed.detectedFields, ['customerCode', 'cnpj', 'postalCode', 'address']);
+  assert.deepEqual(parsed.rows[0].normalized, {
+    customerCode: 'C020098',
+    cnpj: '16880152000166',
+    postalCode: '37834-686',
+    address: 'ANGELA CRISTINA BENEDETTI, 203 - POLO DA MODA - Guaxupé/MG',
+    city: 'Guaxupé',
+    state: 'MG',
+    companyName: 'Cliente C020098',
+  });
+});
+
 test('reconhece região, cidade-polo e coordenadas da planilha de rotas', async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Mapa de rotas');

@@ -8,6 +8,7 @@ import { clearSessionCookie, createSession, readSession, requireApiAuth, require
 import { getPool, query } from './db.js';
 import { migrate } from './migrate.js';
 import { parseWorkbook, persistImport } from './importer.js';
+import { downloadGoogleSpreadsheet } from './google-sheet.js';
 import { buildRouteShare, buildWazeUrl, haversineKm } from './navigation.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -146,13 +147,16 @@ app.post('/api/imports', upload.single('file'), async (req, res, next) => {
   try {
     const sourceType = req.body.sourceType;
     if (!['erp', 'routes', 'candidates'].includes(sourceType)) return res.status(400).json({ error: 'Origem inválida.' });
-    if (!req.file) return res.status(400).json({ error: 'Envie um arquivo .xlsx.' });
-    if (!req.file.originalname.toLowerCase().endsWith('.xlsx')) return res.status(400).json({ error: 'Somente arquivos .xlsx são aceitos.' });
-    const parsed = await parseWorkbook(req.file.buffer, req.body.sheetName || undefined);
+    if (!req.file && !req.body.googleSheetUrl) return res.status(400).json({ error: 'Envie um arquivo .xlsx ou informe um link do Google Sheets.' });
+    if (req.file && !req.file.originalname.toLowerCase().endsWith('.xlsx')) return res.status(400).json({ error: 'Somente arquivos .xlsx são aceitos.' });
+    const source = req.file || await downloadGoogleSpreadsheet(req.body.googleSheetUrl);
+    const sourceBuffer = source.buffer;
+    const sourceName = req.file?.originalname || source.fileName;
+    const parsed = await parseWorkbook(sourceBuffer, req.body.sheetName || undefined);
     const client = await getPool().connect();
     try {
       const summary = await persistImport(client, {
-        sourceType, fileName: req.file.originalname, requestedSheet: req.body.sheetName,
+        sourceType, fileName: sourceName, requestedSheet: req.body.sheetName,
         parsed, actorEmail: req.user.email,
       });
       res.status(201).json(summary);

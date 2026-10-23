@@ -2,7 +2,7 @@ import ExcelJS from 'exceljs';
 import { haversineKm } from './navigation.js';
 
 const aliases = {
-  customerCode: ['codigo', 'cod cliente', 'codigo cliente', 'cliente', 'codcli', 'cod'],
+  customerCode: ['codigo', 'cod cliente', 'codigo cliente', 'codigo do cliente', 'cliente', 'codcli', 'cod'],
   cnpj: ['cnpj', 'cpf cnpj', 'cpf/cnpj', 'documento'],
   companyName: ['razao social', 'nome cliente', 'nome do cliente', 'cliente nome', 'empresa', 'nome', 'descricao cliente'],
   tradeName: ['nome fantasia', 'fantasia'],
@@ -80,6 +80,13 @@ function normalizeNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function locationFromAddress(address) {
+  const value = textValue(address);
+  const match = value.match(/(?:^|\s-\s)([^-]+?)\/([a-z]{2})\s*$/i);
+  if (!match) return {};
+  return { city: match[1].trim(), state: match[2].toUpperCase() };
+}
+
 function normalizeRow(raw, mapping) {
   const normalized = {};
   for (const [column, field] of mapping.entries()) {
@@ -88,8 +95,14 @@ function normalizeRow(raw, mapping) {
     normalized[field] = value;
   }
   if (normalized.cnpj) normalized.cnpj = normalizeDocument(normalized.cnpj);
+  if (normalized.address && (!normalized.city || !normalized.state)) {
+    const location = locationFromAddress(normalized.address);
+    normalized.city ||= location.city;
+    normalized.state ||= location.state;
+  }
   if (normalized.state) normalized.state = textValue(normalized.state).slice(0, 2).toUpperCase();
   if (normalized.customerCode) normalized.customerCode = textValue(normalized.customerCode);
+  if (!normalized.companyName && normalized.customerCode) normalized.companyName = `Cliente ${normalized.customerCode}`;
   if (normalized.customerCreatedAt) normalized.customerCreatedAt = textValue(normalized.customerCreatedAt).slice(0, 10);
   for (const field of ['creditLimit', 'daysSinceLastSale', 'potentialMin', 'potentialMax', 'latitude', 'longitude', 'distanceFromHubKm']) {
     if (normalized[field] != null) normalized[field] = normalizeNumber(normalized[field]);
