@@ -14,6 +14,11 @@ test('gera e valida hash de senha', async () => {
   assert.equal(await verifyPassword('senha-incorreta', hash), false);
 });
 
+test('recusa hash scrypt malformado sem causar erro interno', async () => {
+  const malformed = 'scrypt$N$r$p$c2FsdA$aGFzaA';
+  assert.equal(await verifyPassword('uma-senha-de-teste-segura', malformed), false);
+});
+
 test('assina e lê sessão', () => {
   process.env.SESSION_SECRET = 'segredo-de-teste-com-mais-de-trinta-e-dois-caracteres';
   const token = createSession('thiago@example.com');

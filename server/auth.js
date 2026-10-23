@@ -61,11 +61,19 @@ export async function verifyPassword(password, encodedHash) {
   if (!isValidPassword(password) || !encodedHash) return false;
   const [algorithm, nText, rText, pText, salt, expectedText] = encodedHash.split('$');
   if (algorithm !== 'scrypt' || !salt || !expectedText) return false;
-  const expected = Buffer.from(expectedText, 'base64url');
-  const actual = await scrypt(password, Buffer.from(salt, 'base64url'), expected.length, {
-    N: Number(nText), r: Number(rText), p: Number(pText), maxmem: 128 * 1024 * 1024,
-  });
-  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  const N = Number(nText), r = Number(rText), p = Number(pText);
+  if (!Number.isInteger(N) || N < 2 || (N & (N - 1)) !== 0 || !Number.isInteger(r) || r < 1 || !Number.isInteger(p) || p < 1) return false;
+  try {
+    const expected = Buffer.from(expectedText, 'base64url');
+    const decodedSalt = Buffer.from(salt, 'base64url');
+    if (!expected.length || !decodedSalt.length) return false;
+    const actual = await scrypt(password, decodedSalt, expected.length, {
+      N, r, p, maxmem: 128 * 1024 * 1024,
+    });
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
 }
 
 export async function hashPassword(password) {
