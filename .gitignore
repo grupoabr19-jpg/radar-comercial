@@ -6,4 +6,6 @@ outputs/
 coverage/
 npm-debug.log*
 *.tar.gz
+__pycache__/
+*.py[cod]
 

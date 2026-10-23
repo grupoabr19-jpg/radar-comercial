@@ -1,0 +1,61 @@
+name: Descobrir prospects por CNAE
+
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot:
+        description: "Competencia da Receita (AAAA-MM); vazio usa a mais recente"
+        required: false
+        type: string
+      max_prospects:
+        description: "Limite de prospects carregados"
+        required: false
+        default: "5000"
+        type: string
+  schedule:
+    - cron: "17 9 15 * *"
+
+concurrency:
+  group: cnpj-discovery
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+      RFB_SHARE_TOKEN: ${{ vars.RFB_SHARE_TOKEN || 'YggdBLfdninEJX9' }}
+      RFB_SNAPSHOT: ${{ inputs.snapshot }}
+      DISCOVERY_MAX_PROSPECTS: ${{ inputs.max_prospects || '5000' }}
+      DISCOVERY_MAX_CNAES: "40"
+      DISCOVERY_MIN_CUSTOMERS_PER_CNAE: "3"
+    steps:
+      - name: Baixar codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Aplicar migracoes
+        run: |
+          test -n "$DATABASE_URL" || (echo "Configure o secret NEON_DATABASE_URL" && exit 1)
+          npm ci
+          npm run migrate
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias do processamento
+        run: python -m pip install --disable-pip-version-check "psycopg[binary]==3.2.10" "requests==2.32.5"
+
+      - name: Cruzar CNPJ, CNAE e cidades das rotas
+        run: python scripts/discover_prospects.py

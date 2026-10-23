@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""Descobre prospects nas cidades das rotas usando os Dados Abertos do CNPJ/RFB."""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import math
+import os
+import re
+import sqlite3
+import tempfile
+import time
+import unicodedata
+import zipfile
+from collections import Counter
+from datetime import date
+from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
+from xml.etree import ElementTree
+
+import psycopg
+import requests
+
+
+RFB_HOST = "https://arquivos.receitafederal.gov.br"
+RFB_WEBDAV = f"{RFB_HOST}/public.php/webdav"
+SOURCE_NAME = "Receita Federal - Dados Abertos CNPJ"
+ESTABLISHMENT_FILES = [f"Estabelecimentos{i}.zip" for i in range(10)]
+COMPANY_FILES = [f"Empresas{i}.zip" for i in range(10)]
+
+
+def normalized(value: str | None) -> str:
+    text = unicodedata.normalize("NFD", value or "")
+    return re.sub(r"[^A-Z0-9]+", " ", "".join(ch for ch in text if not unicodedata.combining(ch)).upper()).strip()
+
+
+def clean_cnpj(value: str | None) -> str:
+    return re.sub(r"[^0-9A-Z]", "", (value or "").upper())
+
+
+def webdav(session: requests.Session, token: str, path: str = "", depth: int = 1) -> requests.Response:
+    url = f"{RFB_WEBDAV}/{quote(path.strip('/'), safe='/')}" if path else RFB_WEBDAV
+    response = session.request("PROPFIND", url, auth=(token, ""), headers={"Depth": str(depth)}, timeout=90)
+    response.raise_for_status()
+    return response
+
+
+def list_webdav(session: requests.Session, token: str, path: str = "") -> list[str]:
+    root = ElementTree.fromstring(webdav(session, token, path).content)
+    names = []
+    for href in root.findall(".//{DAV:}href"):
+        name = Path(unquote(urlparse(href.text or "").path.rstrip("/"))).name
+        if name and name != Path(path).name:
+            names.append(name)
+    return sorted(set(names))
+
+
+def latest_snapshot(session: requests.Session, token: str) -> str:
+    requested = os.getenv("RFB_SNAPSHOT", "").strip()
+    if requested:
+        if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", requested):
+            raise ValueError("RFB_SNAPSHOT deve estar no formato AAAA-MM.")
+        return requested
+    snapshots = [name for name in list_webdav(session, token) if re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", name)]
+    if not snapshots:
+        raise RuntimeError("Nenhuma competencia AAAA-MM encontrada no compartilhamento da Receita.")
+    return snapshots[-1]
+
+
+def download(session: requests.Session, token: str, snapshot: str, filename: str, target: Path) -> None:
+    url = f"{RFB_WEBDAV}/{snapshot}/{filename}"
+    print(f"Baixando {snapshot}/{filename} ...", flush=True)
+    partial = target.with_suffix(target.suffix + ".partial")
+    for attempt in range(1, 6):
+        downloaded = partial.stat().st_size if partial.exists() else 0
+        headers = {"Range": f"bytes={downloaded}-"} if downloaded else {}
+        try:
+            with session.get(url, auth=(token, ""), headers=headers, stream=True, timeout=(60, 900)) as response:
+                response.raise_for_status()
+                append = downloaded > 0 and response.status_code == 206
+                with partial.open("ab" if append else "wb") as output:
+                    for chunk in response.iter_content(4 * 1024 * 1024):
+                        if chunk:
+                            output.write(chunk)
+            partial.replace(target)
+            return
+        except (requests.RequestException, OSError) as error:
+            if attempt == 5:
+                raise RuntimeError(f"Falha ao baixar {filename} apos 5 tentativas: {error}") from error
+            wait = attempt * 10
+            print(f"Download interrompido; retomando em {wait}s (tentativa {attempt + 1}/5).", flush=True)
+            time.sleep(wait)
+
+
+def rows_from_zip(path: Path):
+    with zipfile.ZipFile(path) as archive:
+        members = [item for item in archive.infolist() if not item.is_dir()]
+        if len(members) != 1:
+            raise RuntimeError(f"ZIP inesperado: {path.name} contem {len(members)} arquivos.")
+        with archive.open(members[0]) as binary:
+            with io.TextIOWrapper(binary, encoding="latin-1", newline="") as text:
+                yield from csv.reader(text, delimiter=";", quotechar='"')
+
+
+def read_domain(session: requests.Session, token: str, snapshot: str, filename: str, workdir: Path) -> dict[str, str]:
+    target = workdir / filename
+    download(session, token, snapshot, filename, target)
+    try:
+        return {row[0].strip(): row[1].strip() for row in rows_from_zip(target) if len(row) >= 2}
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def prepare_stage(path: Path) -> sqlite3.Connection:
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("""CREATE TABLE establishments (
+      cnpj TEXT PRIMARY KEY, cnpj_root TEXT NOT NULL, trade_name TEXT, cnae TEXT NOT NULL,
+      opened_at TEXT, address TEXT, postal_code TEXT, city TEXT, state TEXT,
+      coverage_type TEXT NOT NULL, phone TEXT, email TEXT
+    )""")
+    db.execute("CREATE INDEX establishments_cnae_idx ON establishments(cnae)")
+    return db
+
+
+def select_target_cnaes(counts: Counter, maximum: int, minimum: int) -> list[tuple[str, int]]:
+    return [(cnae, count) for cnae, count in counts.most_common(maximum) if count >= minimum]
+
+
+def score_for(customer_count: int, coverage_type: str, size: str) -> int:
+    score = 48 + min(27, round(7 * math.log2(max(1, customer_count))))
+    if coverage_type == "current":
+        score += 10
+    if size in {"03", "05"}:
+        score += 5
+    return max(1, min(100, score))
+
+
+def main() -> None:
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    token = os.environ.get("RFB_SHARE_TOKEN", "YggdBLfdninEJX9").strip()
+    max_cnaes = int(os.environ.get("DISCOVERY_MAX_CNAES", "40"))
+    min_customers = int(os.environ.get("DISCOVERY_MIN_CUSTOMERS_PER_CNAE", "3"))
+    max_prospects = int(os.environ.get("DISCOVERY_MAX_PROSPECTS", "5000"))
+    if not database_url:
+        raise RuntimeError("DATABASE_URL nao configurada.")
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Grupo-ABR-Radar-Comercial/1.0 (monthly-public-data-import)"})
+    snapshot = latest_snapshot(session, token)
+    snapshot_date = date.fromisoformat(f"{snapshot}-01")
+    print(f"Competencia selecionada: {snapshot}", flush=True)
+
+    with psycopg.connect(database_url) as pg:
+        with pg.cursor() as cursor:
+            cursor.execute("SELECT cnpj,company_name,city,state FROM erp_customers")
+            customers = cursor.fetchall()
+            known_cnpjs = {clean_cnpj(row[0]) for row in customers if clean_cnpj(row[0])}
+            known_roots = {cnpj[:8] for cnpj in known_cnpjs}
+            known_name_places = {
+                (normalized(company_name), normalized(city), (state or "").upper())
+                for _cnpj, company_name, city, state in customers if company_name and city and state
+            }
+            cursor.execute("""SELECT rc.city, rc.state, rc.coverage_type
+              FROM region_cities rc JOIN route_regions rr ON rr.id=rc.region_id
+              WHERE rc.source_name='google_sheet_varejo'""")
+            route_places = {}
+            for city, state, coverage in cursor.fetchall():
+                key = (normalized(city), state.upper())
+                if key not in route_places or coverage == "current":
+                    route_places[key] = coverage
+            cursor.execute("""INSERT INTO discovery_runs(source_name,snapshot_date,known_customers)
+              VALUES (%s,%s,%s) RETURNING id""", (SOURCE_NAME, snapshot_date, len(known_cnpjs)))
+            run_id = cursor.fetchone()[0]
+        pg.commit()
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="radar-cnpj-") as temp:
+                workdir = Path(temp)
+                municipalities = read_domain(session, token, snapshot, "Municipios.zip", workdir)
+                cnae_descriptions = read_domain(session, token, snapshot, "Cnaes.zip", workdir)
+                municipality_names = {code: normalized(name) for code, name in municipalities.items()}
+                customer_cnaes: dict[str, str] = {}
+                cnae_counts: Counter = Counter()
+                stage = prepare_stage(workdir / "regional.sqlite")
+
+                for filename in ESTABLISHMENT_FILES:
+                    target = workdir / filename
+                    download(session, token, snapshot, filename, target)
+                    batch = []
+                    try:
+                        for row in rows_from_zip(target):
+                            if len(row) < 30:
+                                continue
+                            cnpj = clean_cnpj("".join(row[:3]))
+                            root, cnae = clean_cnpj(row[0]), row[11].strip()
+                            if cnpj in known_cnpjs and cnae:
+                                customer_cnaes[cnpj] = cnae
+                            if row[5].strip() != "02" or root in known_roots or not cnae:
+                                continue
+                            place = (municipality_names.get(row[20].strip(), ""), row[19].strip().upper())
+                            coverage = route_places.get(place)
+                            if not coverage:
+                                continue
+                            city = municipalities.get(row[20].strip(), "")
+                            address = " ".join(part.strip() for part in [row[13], row[14], row[15], row[16], row[17]] if part.strip())
+                            phone = "".join(part.strip() for part in [row[21], row[22]] if part.strip())
+                            batch.append((cnpj, root, row[4].strip(), cnae, row[10].strip(), address,
+                                          row[18].strip(), city, row[19].strip().upper(), coverage, phone, row[27].strip()))
+                            if len(batch) >= 5000:
+                                stage.executemany("INSERT OR REPLACE INTO establishments VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", batch)
+                                stage.commit()
+                                batch.clear()
+                        if batch:
+                            stage.executemany("INSERT OR REPLACE INTO establishments VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", batch)
+                            stage.commit()
+                    finally:
+                        target.unlink(missing_ok=True)
+
+                cnae_counts.update(customer_cnaes.values())
+                targets = select_target_cnaes(cnae_counts, max_cnaes, min_customers)
+                if not targets:
+                    raise RuntimeError("Nenhum CNAE atingiu a quantidade minima de clientes conhecidos.")
+                target_counts = dict(targets)
+                placeholders = ",".join("?" for _ in targets)
+                stage.execute(f"DELETE FROM establishments WHERE cnae NOT IN ({placeholders})", [item[0] for item in targets])
+                stage.commit()
+                regional_count = stage.execute("SELECT count(*) FROM establishments").fetchone()[0]
+
+                with pg.cursor() as cursor:
+                    cursor.executemany("UPDATE erp_customers SET primary_cnae=%s,cnae_source_date=%s WHERE cnpj=%s",
+                                       [(cnae, snapshot_date, cnpj) for cnpj, cnae in customer_cnaes.items()])
+                    cursor.executemany("""INSERT INTO prospecting_cnaes
+                      (cnae,description,weight,source_customer_count,source_name)
+                      VALUES (%s,%s,%s,%s,'erp_frequency')
+                      ON CONFLICT(cnae) DO UPDATE SET description=excluded.description,weight=excluded.weight,
+                        source_customer_count=excluded.source_customer_count,updated_at=now()""",
+                      [(cnae, cnae_descriptions.get(cnae), count / max(1, targets[0][1]), count) for cnae, count in targets])
+                    cursor.execute("UPDATE discovery_runs SET matched_customers=%s,target_cnaes=%s,regional_companies=%s WHERE id=%s",
+                                   (len(customer_cnaes), len(targets), regional_count, run_id))
+                pg.commit()
+
+                selected = stage.execute(f"""SELECT cnpj,cnpj_root,trade_name,cnae,opened_at,address,postal_code,
+                    city,state,coverage_type,phone,email FROM establishments
+                  ORDER BY CASE coverage_type WHEN 'current' THEN 0 ELSE 1 END,
+                    CASE cnae {' '.join(f'WHEN ? THEN {index}' for index, _ in enumerate(targets))} ELSE 999 END,
+                    opened_at DESC LIMIT ?""", [item[0] for item in targets] + [max_prospects]).fetchall()
+                selected_roots = {row[1] for row in selected}
+                companies: dict[str, tuple[str, str, str]] = {}
+                for filename in COMPANY_FILES:
+                    target = workdir / filename
+                    download(session, token, snapshot, filename, target)
+                    try:
+                        for row in rows_from_zip(target):
+                            if len(row) >= 6 and clean_cnpj(row[0]) in selected_roots:
+                                companies[clean_cnpj(row[0])] = (row[1].strip(), row[5].strip(), row[4].strip())
+                    finally:
+                        target.unlink(missing_ok=True)
+
+                city_coordinates = {}
+                with pg.cursor() as cursor:
+                    cursor.execute("SELECT lower(city),state,latitude,longitude FROM municipalities")
+                    city_coordinates = {(normalized(city), state): (lat, lon) for city, state, lat, lon in cursor.fetchall()}
+                    records = []
+                    skipped_by_name = 0
+                    for item in selected:
+                        cnpj, root, trade, cnae, opened, address, cep, city, state, coverage, phone, email = item
+                        company_name, size, _capital = companies.get(root, (trade or f"Empresa {cnpj}", "00", "0"))
+                        if ((normalized(company_name), normalized(city), state) in known_name_places or
+                                (trade and (normalized(trade), normalized(city), state) in known_name_places)):
+                            skipped_by_name += 1
+                            continue
+                        coordinates = city_coordinates.get((normalized(city), state), (None, None))
+                        reasons = [
+                            f"CNAE presente em {target_counts[cnae]} clientes cadastrados no ERP",
+                            f"Empresa ativa em cidade de cobertura {coverage} da rota",
+                            "CNPJ nao encontrado na base atual nem em grupo empresarial ja atendido",
+                        ]
+                        records.append((cnpj, company_name, trade or None, cnae, cnae_descriptions.get(cnae), city, state,
+                                        cep or None, address or None, coordinates[0], coordinates[1], size or None,
+                                        opened or None, snapshot_date, score_for(target_counts[cnae], coverage, size),
+                                        json.dumps(reasons, ensure_ascii=False)))
+                    cursor.executemany("""INSERT INTO prospects
+                      (cnpj,company_name,trade_name,primary_cnae,cnae_description,segment,city,state,postal_code,address,
+                       latitude,longitude,company_size,opened_at,cadastral_status,source_snapshot_date,source_name,
+                       status,priority,score,confidence,score_reasons)
+                      VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ATIVA',%s,%s,'review',
+                        CASE WHEN %s >= 80 THEN 'high' WHEN %s >= 60 THEN 'medium' ELSE 'low' END,%s,72,%s::jsonb)
+                      ON CONFLICT(cnpj) WHERE cnpj IS NOT NULL DO UPDATE SET
+                        company_name=excluded.company_name,trade_name=excluded.trade_name,primary_cnae=excluded.primary_cnae,
+                        cnae_description=excluded.cnae_description,segment=excluded.segment,city=excluded.city,state=excluded.state,
+                        postal_code=excluded.postal_code,address=excluded.address,latitude=excluded.latitude,longitude=excluded.longitude,
+                        company_size=excluded.company_size,opened_at=excluded.opened_at,cadastral_status=excluded.cadastral_status,
+                        source_snapshot_date=excluded.source_snapshot_date,source_name=excluded.source_name,score=excluded.score,
+                        priority=excluded.priority,score_reasons=excluded.score_reasons,updated_at=now()""",
+                      [(r[0], r[1], r[2], r[3], r[4], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12],
+                        r[13], SOURCE_NAME, r[14], r[14], r[14], r[15]) for r in records])
+                    cursor.execute("""UPDATE discovery_runs SET status='completed',prospects_created=%s,
+                      completed_at=now() WHERE id=%s""", (len(records), run_id))
+                pg.commit()
+                stage.close()
+                print(json.dumps({"snapshot": snapshot, "knownCustomers": len(customers),
+                                  "matchedCustomers": len(customer_cnaes), "targetCnaes": len(targets),
+                                  "regionalCompanies": regional_count, "prospectsLoaded": len(records),
+                                  "skippedByNameAndCity": skipped_by_name}), flush=True)
+        except Exception as error:
+            pg.rollback()
+            with pg.cursor() as cursor:
+                cursor.execute("UPDATE discovery_runs SET status='failed',error_message=%s,completed_at=now() WHERE id=%s",
+                               (str(error)[:2000], run_id))
+            pg.commit()
+            raise
+
+
+if __name__ == "__main__":
+    main()
