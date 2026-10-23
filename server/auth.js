@@ -4,6 +4,11 @@ import { promisify } from 'node:util';
 const scrypt = promisify(crypto.scrypt);
 const COOKIE_NAME = 'radar_session';
 const SESSION_SECONDS = 12 * 60 * 60;
+export const MIN_PASSWORD_LENGTH = 12;
+
+export function isValidPassword(password) {
+  return typeof password === 'string' && password.length >= MIN_PASSWORD_LENGTH;
+}
 
 function encode(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -53,7 +58,7 @@ export function clearSessionCookie(res) {
 }
 
 export async function verifyPassword(password, encodedHash) {
-  if (!encodedHash) return false;
+  if (!isValidPassword(password) || !encodedHash) return false;
   const [algorithm, nText, rText, pText, salt, expectedText] = encodedHash.split('$');
   if (algorithm !== 'scrypt' || !salt || !expectedText) return false;
   const expected = Buffer.from(expectedText, 'base64url');
@@ -64,6 +69,9 @@ export async function verifyPassword(password, encodedHash) {
 }
 
 export async function hashPassword(password) {
+  if (!isValidPassword(password)) {
+    throw new RangeError(`A senha deve ter pelo menos ${MIN_PASSWORD_LENGTH} caracteres.`);
+  }
   const N = 32768, r = 8, p = 1;
   const salt = crypto.randomBytes(16);
   const hash = await scrypt(password, salt, 64, { N, r, p, maxmem: 128 * 1024 * 1024 });

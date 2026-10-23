@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSession, hashPassword, readSession, verifyPassword } from '../server/auth.js';
+import { createSession, hashPassword, isValidPassword, readSession, verifyPassword } from '../server/auth.js';
+
+test('aceita qualquer composição com no mínimo 12 caracteres', () => {
+  assert.equal(isValidPassword('abcdefghijkl'), true);
+  assert.equal(isValidPassword('!!!!!!!!!!!!'), true);
+  assert.equal(isValidPassword('abcdefghijk'), false);
+});
 
 test('gera e valida hash de senha', async () => {
   const hash = await hashPassword('uma-senha-de-teste-segura');

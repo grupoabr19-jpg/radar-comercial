@@ -72,6 +72,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 .login-brand>p{color:#f6a63b}.login-brand h1{font-family:"Montserrat",sans-serif}.login-brand>span:last-child{color:#d4daf0}
 .login-card{border-color:#dfe3ed;box-shadow:0 18px 55px rgba(20,39,88,.11)}
 .login-card h2,.login-card input{font-family:"Montserrat",sans-serif}
+.login-password-rule{display:block;margin-top:-8px;color:#737c96;font-size:10px;line-height:1.4}
 .login-card input:focus{border-color:var(--brand-blue);box-shadow:0 0 0 3px rgba(37,53,117,.12)}
 .import-summary{background:#f4f6fb;border-color:#dfe3ed}
 @media(max-width:760px){.login-logo{width:180px;max-height:104px;margin-bottom:20px}.login-brand:before{right:-420px;bottom:-500px}}
