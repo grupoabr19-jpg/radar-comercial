@@ -1,13 +1,16 @@
 import crypto from 'node:crypto';
-import { promisify } from 'node:util';
 
-const scrypt = promisify(crypto.scrypt);
 const COOKIE_NAME = 'radar_session';
 const SESSION_SECONDS = 12 * 60 * 60;
 export const MIN_PASSWORD_LENGTH = 12;
 
 export function isValidPassword(password) {
-  return typeof password === 'string' && password.length >= MIN_PASSWORD_LENGTH;
+  return typeof password === 'string'
+    && password.length >= MIN_PASSWORD_LENGTH
+    && /[a-z]/.test(password)
+    && /[A-Z]/.test(password)
+    && /[0-9]/.test(password)
+    && /[^A-Za-z0-9\s]/.test(password);
 }
 
 function encode(value) {
@@ -57,33 +60,11 @@ export function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
 }
 
-export async function verifyPassword(password, encodedHash) {
-  if (!isValidPassword(password) || !encodedHash) return false;
-  const [algorithm, nText, rText, pText, salt, expectedText] = encodedHash.split('$');
-  if (algorithm !== 'scrypt' || !salt || !expectedText) return false;
-  const N = Number(nText), r = Number(rText), p = Number(pText);
-  if (!Number.isInteger(N) || N < 2 || (N & (N - 1)) !== 0 || !Number.isInteger(r) || r < 1 || !Number.isInteger(p) || p < 1) return false;
-  try {
-    const expected = Buffer.from(expectedText, 'base64url');
-    const decodedSalt = Buffer.from(salt, 'base64url');
-    if (!expected.length || !decodedSalt.length) return false;
-    const actual = await scrypt(password, decodedSalt, expected.length, {
-      N, r, p, maxmem: 128 * 1024 * 1024,
-    });
-    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
-  } catch {
-    return false;
-  }
-}
-
-export async function hashPassword(password) {
-  if (!isValidPassword(password)) {
-    throw new RangeError(`A senha deve ter pelo menos ${MIN_PASSWORD_LENGTH} caracteres.`);
-  }
-  const N = 32768, r = 8, p = 1;
-  const salt = crypto.randomBytes(16);
-  const hash = await scrypt(password, salt, 64, { N, r, p, maxmem: 128 * 1024 * 1024 });
-  return `scrypt$${N}$${r}$${p}$${salt.toString('base64url')}$${hash.toString('base64url')}`;
+export function verifyPassword(password, expectedPassword) {
+  if (!isValidPassword(password) || !isValidPassword(expectedPassword)) return false;
+  const actual = Buffer.from(password, 'utf8');
+  const expected = Buffer.from(expectedPassword, 'utf8');
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
 
 export function requireApiAuth(req, res, next) {

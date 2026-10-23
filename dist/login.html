@@ -24,8 +24,8 @@
       <p>Use as credenciais definidas para o ambiente de produção.</p>
       <form id="loginForm">
         <label>E-mail<input type="email" name="email" autocomplete="username" required></label>
-        <label>Senha<input type="password" name="password" autocomplete="current-password" minlength="12" aria-describedby="passwordRule" required></label>
-        <small class="login-password-rule" id="passwordRule">Mínimo de 12 caracteres, sem outras exigências.</small>
+        <label>Senha<input type="password" name="password" autocomplete="current-password" minlength="12" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9\s]).{12,}" aria-describedby="passwordRule" required></label>
+        <small class="login-password-rule" id="passwordRule">12+ caracteres, com maiúscula, minúscula, número e símbolo.</small>
         <button class="primary-button" type="submit">Entrar</button>
         <div class="login-error" id="loginError" role="alert"></div>
       </form>

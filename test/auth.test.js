@@ -1,22 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSession, hashPassword, isValidPassword, readSession, verifyPassword } from '../server/auth.js';
+import { createSession, isValidPassword, readSession, verifyPassword } from '../server/auth.js';
 
-test('aceita qualquer composição com no mínimo 12 caracteres', () => {
-  assert.equal(isValidPassword('abcdefghijkl'), true);
-  assert.equal(isValidPassword('!!!!!!!!!!!!'), true);
-  assert.equal(isValidPassword('abcdefghijk'), false);
+test('exige 12 caracteres, maiúscula, minúscula, número e símbolo', () => {
+  assert.equal(isValidPassword('MinhaSenha@2027'), true);
+  assert.equal(isValidPassword('minhasenha@2027'), false);
+  assert.equal(isValidPassword('MINHASENHA@2027'), false);
+  assert.equal(isValidPassword('MinhaSenha@abc'), false);
+  assert.equal(isValidPassword('MinhaSenha2027'), false);
+  assert.equal(isValidPassword('Senha@2027'), false);
 });
 
-test('gera e valida hash de senha', async () => {
-  const hash = await hashPassword('uma-senha-de-teste-segura');
-  assert.equal(await verifyPassword('uma-senha-de-teste-segura', hash), true);
-  assert.equal(await verifyPassword('senha-incorreta', hash), false);
-});
-
-test('recusa hash scrypt malformado sem causar erro interno', async () => {
-  const malformed = 'scrypt$N$r$p$c2FsdA$aGFzaA';
-  assert.equal(await verifyPassword('uma-senha-de-teste-segura', malformed), false);
+test('compara diretamente a senha configurada', () => {
+  assert.equal(verifyPassword('MinhaSenha@2027', 'MinhaSenha@2027'), true);
+  assert.equal(verifyPassword('SenhaErrada@2027', 'MinhaSenha@2027'), false);
+  assert.equal(verifyPassword('MinhaSenha@2027', ''), false);
 });
 
 test('assina e lê sessão', () => {

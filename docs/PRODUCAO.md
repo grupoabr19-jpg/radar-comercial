@@ -18,7 +18,7 @@ O formulário aceita tanto um `.xlsx` quanto um link compartilhado do Google She
 - `DATABASE_URL`: URL com pool do Neon, usada pela aplicação.
 - `DATABASE_URL_UNPOOLED`: URL direta do Neon, usada somente nas migrações.
 - `ADMIN_EMAIL`: e-mail do administrador.
-- `ADMIN_PASSWORD_HASH`: hash criado com `npm run hash-password -- "senha longa"`.
+- `ADMIN_PASSWORD`: senha definida manualmente, com 12 ou mais caracteres, incluindo maiúscula, minúscula, número e símbolo.
 - `SESSION_SECRET`: gerada pelo Blueprint do Render.
 
 ## Publicação

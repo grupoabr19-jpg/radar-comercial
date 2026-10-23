@@ -34,7 +34,7 @@ app.get('/api/health', async (_req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const expectedEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
-  const validPassword = await verifyPassword(String(req.body.password || ''), process.env.ADMIN_PASSWORD_HASH);
+  const validPassword = verifyPassword(String(req.body.password || ''), process.env.ADMIN_PASSWORD);
   if (!expectedEmail || email !== expectedEmail || !validPassword) {
     return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
   }
