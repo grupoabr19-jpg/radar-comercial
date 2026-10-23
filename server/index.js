@@ -72,9 +72,14 @@ app.get('/api/dashboard', async (_req, res, next) => {
       WHERE visited_at >= date_trunc('month', now())`);
     const operational = await query(`SELECT
       (SELECT count(*)::int FROM erp_customers) AS customers,
+      (SELECT count(*)::int FROM erp_customers WHERE primary_cnae IS NOT NULL) AS customers_with_cnae,
+      (SELECT count(*)::int FROM prospecting_cnaes WHERE enabled) AS target_cnaes,
       (SELECT count(*)::int FROM route_regions WHERE source_batch_id IS NOT NULL) AS synced_regions,
       (SELECT count(*)::int FROM region_cities WHERE source_name='google_sheet_varejo') AS mapped_cities,
-      (SELECT max(completed_at) FROM import_batches WHERE status='completed') AS last_sync`);
+      (SELECT max(completed_at) FROM import_batches WHERE status='completed') AS last_sync,
+      (SELECT status FROM discovery_runs ORDER BY started_at DESC LIMIT 1) AS discovery_status,
+      (SELECT snapshot_date FROM discovery_runs ORDER BY started_at DESC LIMIT 1) AS discovery_snapshot,
+      (SELECT completed_at FROM discovery_runs ORDER BY started_at DESC LIMIT 1) AS discovery_completed_at`);
     res.json({ ...result.rows[0], ...visits.rows[0], ...operational.rows[0] });
   } catch (error) { next(error); }
 });
@@ -304,7 +309,12 @@ app.get('/login.js', (_req, res) => res.sendFile(path.join(root, 'dist', 'login.
 app.get('/styles.css', (_req, res) => res.sendFile(path.join(root, 'dist', 'styles.css')));
 app.use('/vendor/leaflet', express.static(path.join(root, 'node_modules', 'leaflet', 'dist'), { maxAge: '30d' }));
 app.get('/assets/logo-grupo-abr-branca.svg', (_req, res) => res.sendFile(path.join(root, 'dist', 'assets', 'logo-grupo-abr-branca.svg')));
-app.get('/', requirePageAuth, (_req, res) => res.sendFile(path.join(root, 'dist', 'index.html')));
+app.get('/app.js', requirePageAuth, (_req, res) => res.sendFile(path.join(root, 'dist', 'app.js'), {
+  headers: { 'Cache-Control': 'no-store, max-age=0' },
+}));
+app.get('/', requirePageAuth, (_req, res) => res.sendFile(path.join(root, 'dist', 'index.html'), {
+  headers: { 'Cache-Control': 'no-store, max-age=0' },
+}));
 app.use(requirePageAuth, express.static(path.join(root, 'dist'), { index: false, maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0 }));
 
 app.use((error, _req, res, _next) => {

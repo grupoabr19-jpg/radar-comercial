@@ -1,6 +1,12 @@
 name: Descobrir prospects por CNAE
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/discover-prospects.yml"
+      - "scripts/discover_prospects.py"
+      - "migrations/005_cnpj_discovery.sql"
   workflow_dispatch:
     inputs:
       snapshot:

@@ -40,6 +40,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 .period-picker button.active{color:var(--brand-blue)}
 .panel,.metric-card,.visit-stats{border-color:var(--line);box-shadow:0 3px 14px rgba(20,39,88,.04)}
 .text-button,.full-text-button,.region-prospects-button,.waze-link{color:var(--brand-blue)}
+.app-loading .app-shell{opacity:0;pointer-events:none}.app-loading body:before{content:"Carregando dados reais do Radar Comercial...";position:fixed;inset:0;display:grid;place-items:center;background:#f4f6fb;color:#142758;font:700 14px Montserrat,sans-serif;z-index:9999}.app-shell{transition:opacity .15s ease}
 .route-line path,.route-main path{stroke:var(--brand-blue)}.route-line circle{fill:var(--brand-blue)}
 .number-pin circle{fill:var(--brand-blue)}
 .map-art>rect:first-of-type,.map-wrap{background:#eef1f8}.map-labels text{fill:#7c87aa}
