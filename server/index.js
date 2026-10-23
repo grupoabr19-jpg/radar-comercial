@@ -7,11 +7,15 @@ import multer from 'multer';
 import { clearSessionCookie, createSession, readSession, requireApiAuth, requirePageAuth, setSessionCookie, verifyPassword } from './auth.js';
 import { getPool, query } from './db.js';
 import { migrate } from './migrate.js';
-import { parseWorkbook, persistImport } from './importer.js';
+import { parseRetailRouteMatrix, parseWorkbook, persistImport } from './importer.js';
 import { downloadGoogleSpreadsheet } from './google-sheet.js';
 import { buildRouteShare, buildWazeUrl, haversineKm } from './navigation.js';
+import { syncGoogleSheet } from './sheet-sync.js';
+import { lookupCep, lookupCnpj } from './brasil-api.js';
+import { findMunicipality } from './municipalities.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const defaultGoogleSheetUrl = 'https://docs.google.com/spreadsheets/d/18WarJapxqvW4s61k5rjE4qTGsDorr29rJ9QkOG0IO2M/edit';
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 1 } });
 
@@ -66,7 +70,12 @@ app.get('/api/dashboard', async (_req, res, next) => {
       FROM prospects`);
     const visits = await query(`SELECT count(*)::int AS visits_month FROM visits
       WHERE visited_at >= date_trunc('month', now())`);
-    res.json({ ...result.rows[0], ...visits.rows[0] });
+    const operational = await query(`SELECT
+      (SELECT count(*)::int FROM erp_customers) AS customers,
+      (SELECT count(*)::int FROM route_regions WHERE source_batch_id IS NOT NULL) AS synced_regions,
+      (SELECT count(*)::int FROM region_cities WHERE source_name='google_sheet_varejo') AS mapped_cities,
+      (SELECT max(completed_at) FROM import_batches WHERE status='completed') AS last_sync`);
+    res.json({ ...result.rows[0], ...visits.rows[0], ...operational.rows[0] });
   } catch (error) { next(error); }
 });
 
@@ -111,16 +120,28 @@ app.get('/api/prospects/nearby', async (req, res, next) => {
 
 app.post('/api/prospects', async (req, res, next) => {
   try {
-    const { companyName, cnpj, segment, city, state, priority = 'medium', notes } = req.body;
+    const { companyName, cnpj, segment, city, state, postalCode, address, priority = 'medium', notes } = req.body;
     if (!companyName) return res.status(400).json({ error: 'Nome da empresa é obrigatório.' });
     const normalizedCnpj = cnpj ? String(cnpj).replace(/\D/g, '') : null;
     if (normalizedCnpj && normalizedCnpj.length !== 14) return res.status(400).json({ error: 'CNPJ inválido.' });
+    const municipality = city && state ? findMunicipality(city, state) : null;
     const result = await query(`INSERT INTO prospects
-      (company_name, cnpj, segment, city, state, priority, source_name, score_reasons)
-      VALUES ($1,$2,$3,$4,$5,$6,'cadastro manual',$7) RETURNING *`,
-    [companyName, normalizedCnpj, segment, city, state?.toUpperCase(), priority, JSON.stringify(notes ? [notes] : ['Incluído manualmente pela equipe'])]);
+      (company_name, cnpj, segment, city, state, postal_code, address, latitude, longitude,
+       priority, source_name, score_reasons)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'cadastro manual',$11) RETURNING *`,
+    [companyName, normalizedCnpj, segment, city, state?.toUpperCase(), postalCode, address,
+      municipality?.latitude, municipality?.longitude, priority,
+      JSON.stringify(notes ? [notes, 'Coordenada aproximada do centro do município'] : ['Incluído manualmente pela equipe', 'Coordenada aproximada do centro do município'])]);
     res.status(201).json(result.rows[0]);
   } catch (error) { next(error); }
+});
+
+app.get('/api/lookup/cep/:cep', async (req, res, next) => {
+  try { res.json(await lookupCep(req.params.cep)); } catch (error) { next(error); }
+});
+
+app.get('/api/lookup/cnpj/:cnpj', async (req, res, next) => {
+  try { res.json(await lookupCnpj(req.params.cnpj)); } catch (error) { next(error); }
 });
 
 app.get('/api/visits', async (_req, res, next) => {
@@ -152,7 +173,10 @@ app.post('/api/imports', upload.single('file'), async (req, res, next) => {
     const source = req.file || await downloadGoogleSpreadsheet(req.body.googleSheetUrl);
     const sourceBuffer = source.buffer;
     const sourceName = req.file?.originalname || source.fileName;
-    const parsed = await parseWorkbook(sourceBuffer, req.body.sheetName || undefined);
+    const isRetailMatrix = sourceType === 'routes' && (req.body.sheetName || '').trim().toLowerCase() === 'varejo';
+    const parsed = isRetailMatrix
+      ? await parseRetailRouteMatrix(sourceBuffer, req.body.sheetName)
+      : await parseWorkbook(sourceBuffer, req.body.sheetName || undefined);
     const client = await getPool().connect();
     try {
       const summary = await persistImport(client, {
@@ -161,6 +185,18 @@ app.post('/api/imports', upload.single('file'), async (req, res, next) => {
       });
       res.status(201).json(summary);
     } finally { client.release(); }
+  } catch (error) { next(error); }
+});
+
+app.post('/api/sync/google-sheet', async (req, res, next) => {
+  try {
+    const googleSheetUrl = req.body.googleSheetUrl || process.env.GOOGLE_SHEET_URL || defaultGoogleSheetUrl;
+    const results = await syncGoogleSheet({
+      googleSheetUrl,
+      actorEmail: req.user.email,
+      includeCustomers: req.body.includeCustomers !== false,
+    });
+    res.status(201).json({ results });
   } catch (error) { next(error); }
 });
 
@@ -178,9 +214,10 @@ app.get('/api/regions', async (req, res, next) => {
     const requestedRadius = Number(req.query.radiusKm || 50);
     const radiusKm = Math.min(500, Math.max(1, Number.isFinite(requestedRadius) ? requestedRadius : 50));
     const [regionsResult, citiesResult, municipalitiesResult, prospectsResult] = await Promise.all([
-      query(`SELECT id, name, hub_city, hub_state, hub_latitude, hub_longitude, default_radius_km
+      query(`SELECT id, name, hub_city, hub_state, hub_latitude, hub_longitude, default_radius_km,
+        seller_name, specialist_name, corporate_contact, construction_contact, source_label, updated_at
         FROM route_regions ORDER BY name`),
-      query(`SELECT region_id, city_key, city, state, latitude, longitude, distance_from_hub_km
+      query(`SELECT region_id, city_key, city, state, latitude, longitude, distance_from_hub_km, coverage_type
         FROM region_cities ORDER BY city`),
       query(`SELECT city_key, city, state, latitude, longitude FROM municipalities
         WHERE latitude IS NOT NULL AND longitude IS NOT NULL`),
@@ -191,7 +228,7 @@ app.get('/api/regions', async (req, res, next) => {
       const found = new Map();
       for (const city of citiesResult.rows.filter((item) => item.region_id === region.id)) {
         const distance = city.distance_from_hub_km == null ? null : Number(city.distance_from_hub_km);
-        if (distance == null || distance <= radiusKm) found.set(`${city.city_key}|${city.state}`, { ...city, distanceKm: distance, source: 'route' });
+        if (distance == null || distance <= radiusKm) found.set(`${city.city_key}|${city.state}`, { ...city, distanceKm: distance, source: city.coverage_type });
       }
       for (const city of municipalitiesResult.rows) {
         const distance = haversineKm(region.hub_latitude, region.hub_longitude, city.latitude, city.longitude);
@@ -211,6 +248,9 @@ app.get('/api/regions', async (req, res, next) => {
         id: region.id, name: region.name, hubCity: region.hub_city, hubState: region.hub_state,
         hubLatitude: region.hub_latitude, hubLongitude: region.hub_longitude,
         defaultRadiusKm: region.default_radius_km, radiusKm,
+        sellerName: region.seller_name, specialistName: region.specialist_name,
+        corporateContact: region.corporate_contact, constructionContact: region.construction_contact,
+        sourceLabel: region.source_label, updatedAt: region.updated_at,
         canExpandByRadius: region.hub_latitude != null && region.hub_longitude != null,
         prospectCount: matchingProspects.length,
         prospectIds: matchingProspects.slice(0, 500).map((prospect) => prospect.id),
@@ -262,6 +302,7 @@ app.get('/api/routes/:routeId/navigation', async (req, res, next) => {
 app.get('/login.html', (_req, res) => res.sendFile(path.join(root, 'dist', 'login.html')));
 app.get('/login.js', (_req, res) => res.sendFile(path.join(root, 'dist', 'login.js')));
 app.get('/styles.css', (_req, res) => res.sendFile(path.join(root, 'dist', 'styles.css')));
+app.use('/vendor/leaflet', express.static(path.join(root, 'node_modules', 'leaflet', 'dist'), { maxAge: '30d' }));
 app.get('/assets/logo-grupo-abr-branca.svg', (_req, res) => res.sendFile(path.join(root, 'dist', 'assets', 'logo-grupo-abr-branca.svg')));
 app.get('/', requirePageAuth, (_req, res) => res.sendFile(path.join(root, 'dist', 'index.html')));
 app.use(requirePageAuth, express.static(path.join(root, 'dist'), { index: false, maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0 }));
@@ -270,13 +311,23 @@ app.use((error, _req, res, _next) => {
   console.error(error);
   if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Arquivo maior que 30 MB.' });
   if (error.code === '23505') return res.status(409).json({ error: 'Já existe um registro com esse identificador.' });
-  res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Erro interno.' : error.message });
+  const status = Number(error.status) || 500;
+  res.status(status).json({ error: status >= 500 && process.env.NODE_ENV === 'production' ? 'Serviço temporariamente indisponível.' : error.message });
 });
 
 const port = Number(process.env.PORT || 3000);
 
 await migrate();
 const server = app.listen(port, '0.0.0.0', () => console.log(`Radar Comercial ouvindo em 0.0.0.0:${port}`));
+
+if (process.env.GOOGLE_SHEET_URL && process.env.AUTO_SYNC_GOOGLE_SHEET !== 'false') {
+  setTimeout(() => syncGoogleSheet({
+    googleSheetUrl: process.env.GOOGLE_SHEET_URL,
+    actorEmail: 'sincronizacao@grupoabr.com.br',
+    includeCustomers: process.env.AUTO_SYNC_CUSTOMERS !== 'false',
+  }).then((results) => console.log('Google Sheets sincronizado:', results.map((item) => `${item.sheetName}=${item.accepted}`).join(', ')))
+    .catch((error) => console.error('Falha na sincronização do Google Sheets:', error)), 1000);
+}
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => server.close(() => process.exit(0)));

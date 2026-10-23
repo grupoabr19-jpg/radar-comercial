@@ -1,10 +1,11 @@
 import ExcelJS from 'exceljs';
 import { haversineKm } from './navigation.js';
+import { cityKey, findMunicipality } from './municipalities.js';
 
 const aliases = {
   customerCode: ['codigo', 'cod cliente', 'codigo cliente', 'codigo do cliente', 'cliente', 'codcli', 'cod'],
   cnpj: ['cnpj', 'cpf cnpj', 'cpf/cnpj', 'documento'],
-  companyName: ['razao social', 'nome cliente', 'nome do cliente', 'cliente nome', 'empresa', 'nome', 'descricao cliente'],
+  companyName: ['razao social', 'nome razao social', 'nome cliente', 'nome do cliente', 'cliente nome', 'empresa', 'nome', 'descricao cliente'],
   tradeName: ['nome fantasia', 'fantasia'],
   city: ['cidade', 'municipio'],
   state: ['uf', 'estado'],
@@ -148,6 +149,109 @@ export async function parseWorkbook(buffer, requestedSheet) {
   };
 }
 
+const retailHubs = {
+  'BRAGANCA': ['Bragança Paulista', 'SP'],
+  'JUNDIAI': ['Jundiaí', 'SP'],
+  'VARGINHA': ['Varginha', 'MG'],
+  'POUSO ALEGRE': ['Pouso Alegre', 'MG'],
+  'POCOS DE CALDAS': ['Poços de Caldas', 'MG'],
+  'ITAJUBA': ['Itajubá', 'MG'],
+  'EXTREMA': ['Extrema', 'MG'],
+  'CAMBUI': ['Cambuí', 'MG'],
+};
+
+function routeRegionKey(value) {
+  return normalizeHeader(value).toUpperCase();
+}
+
+function currentCityOverride(regionName, cityName) {
+  const key = `${routeRegionKey(regionName)}|${routeRegionKey(cityName)}`;
+  const overrides = {
+    'ITAJUBA|SAO BENTO': ['São Bento do Sapucaí', 'SP'],
+    'ITAJUBA|SAO BENTO ABADE': ['São Bento Abade', 'MG'],
+    'CAMBUI|SENADOR': ['Senador Amaral', 'MG'],
+    'JUNDIAI|CAMPO LIMPO': ['Campo Limpo Paulista', 'SP'],
+    'VARGINHA|SAO GONCALO': ['São Gonçalo do Sapucaí', 'MG'],
+  };
+  return overrides[key] || [cityName, null];
+}
+
+function parsePotentialCity(value) {
+  const match = textValue(value).match(/^(.+?)\s*\(([A-Z]{2})\)\s*$/i);
+  return match ? { city: match[1].trim(), state: match[2].toUpperCase() } : null;
+}
+
+export async function parseRetailRouteMatrix(buffer, requestedSheet = 'Varejo') {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.getWorksheet(requestedSheet);
+  if (!worksheet) throw new Error(`Aba não encontrada: ${requestedSheet}`);
+
+  let regionRow = null;
+  let potentialRow = null;
+  for (let rowNumber = 1; rowNumber <= Math.min(worksheet.rowCount, 80); rowNumber += 1) {
+    const first = normalizeHeader(worksheet.getRow(rowNumber).getCell(1).value);
+    if (first === 'regiao') regionRow = rowNumber;
+    if (first === 'municipios potenciais') potentialRow = rowNumber;
+  }
+  if (!regionRow || !potentialRow) throw new Error('A aba Varejo não contém os blocos REGIÃO e MUNICÍPIOS POTENCIAIS esperados.');
+
+  const rows = [];
+  const regionColumns = [];
+  for (let column = 2; column <= worksheet.columnCount; column += 1) {
+    const regionName = textValue(worksheet.getRow(regionRow).getCell(column).value);
+    if (!regionName) continue;
+    const [hubCity, hubState] = retailHubs[routeRegionKey(regionName)] || [];
+    if (!hubCity) continue;
+    const hub = findMunicipality(hubCity, hubState);
+    if (!hub) throw new Error(`Cidade-polo não encontrada no catálogo: ${hubCity}/${hubState}`);
+    regionColumns.push({ column, regionName, hub, staff: {
+      sellerName: textValue(worksheet.getRow(2).getCell(column).value),
+      specialistName: textValue(worksheet.getRow(3).getCell(column).value),
+      corporateContact: textValue(worksheet.getRow(4).getCell(column).value),
+      constructionContact: textValue(worksheet.getRow(5).getCell(column).value),
+    }});
+  }
+
+  const addRow = (rowNumber, region, place, coverageType) => {
+    const distance = haversineKm(region.hub.latitude, region.hub.longitude, place.latitude, place.longitude);
+    const normalized = {
+      routeName: region.regionName, regionName: region.regionName,
+      hubCity: region.hub.city, hubState: region.hub.state,
+      hubLatitude: region.hub.latitude, hubLongitude: region.hub.longitude,
+      city: place.city, state: place.state, latitude: place.latitude, longitude: place.longitude,
+      distanceFromHubKm: Number(distance.toFixed(2)), coverageType, ...region.staff,
+    };
+    rows.push({ rowNumber: rows.length + 1, raw: { sourceRow: rowNumber, region: region.regionName, city: place.city, state: place.state, coverageType }, normalized });
+  };
+
+  for (const region of regionColumns) {
+    addRow(regionRow, region, region.hub, 'current');
+    for (let rowNumber = regionRow + 1; rowNumber < potentialRow; rowNumber += 1) {
+      const value = textValue(worksheet.getRow(rowNumber).getCell(region.column).value);
+      if (!value) continue;
+      const [resolvedName, forcedState] = currentCityOverride(region.regionName, value);
+      const place = findMunicipality(resolvedName, forcedState, region.hub);
+      if (place) addRow(rowNumber, region, place, 'current');
+    }
+    for (let rowNumber = potentialRow + 1; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+      const value = textValue(worksheet.getRow(rowNumber).getCell(region.column).value);
+      if (!value || /LIM[IÍ]TROFE/i.test(value)) continue;
+      const parsed = parsePotentialCity(value);
+      if (!parsed) continue;
+      const place = findMunicipality(parsed.city, parsed.state, region.hub);
+      if (place) addRow(rowNumber, region, place, 'potential');
+    }
+  }
+
+  return {
+    sheetName: worksheet.name,
+    headerRow: regionRow,
+    detectedFields: ['routeName','hubCity','city','state','latitude','longitude','distanceFromHubKm','coverageType'],
+    rows,
+  };
+}
+
 function validateRow(sourceType, row) {
   const notes = [];
   if (sourceType !== 'routes' && !row.companyName) notes.push('Nome da empresa ausente');
@@ -195,6 +299,51 @@ async function upsertCustomer(client, row, batchId) {
   ]);
 }
 
+async function bulkUpsertCustomers(client, rows, batchId) {
+  for (let offset = 0; offset < rows.length; offset += 500) {
+    const chunk = rows.slice(offset, offset + 500);
+    await client.query(`WITH data AS (
+      SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+        "customerCode" text, cnpj text, "companyName" text, city text, state text,
+        "postalCode" text, address text, segment text, "sellerName" text,
+        "regionCode" text, "regionName" text, "sellerType" text,
+        "contactEmail" text, phone text, "creditLimit" numeric,
+        "daysSinceLastSale" integer, "customerCreatedAt" date, "purchaseAgeBand" text)
+    ) INSERT INTO erp_customers (
+      customer_code, cnpj, company_name, city, state, postal_code, address, segment,
+      seller_name, region_code, region_name, seller_type, contact_email, phone,
+      credit_limit, days_since_last_sale, customer_created_at, purchase_age_band, source_batch_id
+    ) SELECT "customerCode", cnpj, "companyName", city, state, "postalCode", address, segment,
+      "sellerName", "regionCode", "regionName", "sellerType", "contactEmail", phone,
+      "creditLimit", "daysSinceLastSale", "customerCreatedAt", "purchaseAgeBand", $2
+      FROM data
+    ON CONFLICT (customer_code) DO UPDATE SET
+      cnpj=coalesce(EXCLUDED.cnpj,erp_customers.cnpj), company_name=EXCLUDED.company_name,
+      city=EXCLUDED.city, state=EXCLUDED.state, postal_code=EXCLUDED.postal_code,
+      address=EXCLUDED.address, segment=EXCLUDED.segment, seller_name=EXCLUDED.seller_name,
+      region_code=EXCLUDED.region_code, region_name=EXCLUDED.region_name,
+      seller_type=EXCLUDED.seller_type, contact_email=EXCLUDED.contact_email,
+      phone=EXCLUDED.phone, credit_limit=EXCLUDED.credit_limit,
+      days_since_last_sale=EXCLUDED.days_since_last_sale,
+      customer_created_at=EXCLUDED.customer_created_at, purchase_age_band=EXCLUDED.purchase_age_band,
+      source_batch_id=EXCLUDED.source_batch_id, source_updated_at=now(), updated_at=now()`,
+    [JSON.stringify(chunk), batchId]);
+  }
+}
+
+async function bulkInsertImportRows(client, prepared, batchId) {
+  for (let offset = 0; offset < prepared.length; offset += 500) {
+    const chunk = prepared.slice(offset, offset + 500);
+    await client.query(`WITH data AS (
+      SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+        "rowNumber" integer, raw jsonb, normalized jsonb, status text, notes text[])
+    ) INSERT INTO import_rows
+      (batch_id,row_number,raw_data,normalized_data,validation_status,validation_notes)
+      SELECT $2,"rowNumber",raw,normalized,status,notes FROM data`,
+    [JSON.stringify(chunk), batchId]);
+  }
+}
+
 async function upsertProspect(client, row, batchId) {
   await client.query(`INSERT INTO prospects (
       external_key, cnpj, company_name, trade_name, segment, city, state, postal_code,
@@ -213,10 +362,6 @@ async function upsertProspect(client, row, batchId) {
     row.potentialMin, row.potentialMax, batchId,
     JSON.stringify(['Importado de fonte externa', 'Aguardando validação comercial']),
   ]);
-}
-
-function cityKey(value = '') {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 async function upsertMunicipality(client, row, sourceName) {
@@ -249,25 +394,37 @@ async function syncRouteRegions(client, rows, batchId) {
     const explicitHub = entries.find((row) => row.hubCity && cityKey(row.hubCity) === cityKey(row.city));
     const hub = explicitHub || [...entries].sort((a, b) => counts.get(`${cityKey(b.city)}|${b.state}`) - counts.get(`${cityKey(a.city)}|${a.state}`))[0];
     const region = await client.query(`INSERT INTO route_regions
-      (name, hub_city, hub_state, hub_latitude, hub_longitude, source_batch_id)
-      VALUES ($1,$2,$3,$4,$5,$6)
+      (name, hub_city, hub_state, hub_latitude, hub_longitude, source_batch_id,
+       seller_name, specialist_name, corporate_contact, construction_contact, source_label)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Google Sheets · Varejo')
       ON CONFLICT (name) DO UPDATE SET hub_city=EXCLUDED.hub_city, hub_state=EXCLUDED.hub_state,
         hub_latitude=coalesce(EXCLUDED.hub_latitude, route_regions.hub_latitude),
         hub_longitude=coalesce(EXCLUDED.hub_longitude, route_regions.hub_longitude),
-        source_batch_id=EXCLUDED.source_batch_id, updated_at=now()
-      RETURNING id`, [name, hub.city, hub.state, hub.latitude, hub.longitude, batchId]);
-    const uniqueCities = new Map(entries.map((row) => [`${cityKey(row.city)}|${row.state}`, row]));
+        source_batch_id=EXCLUDED.source_batch_id, seller_name=EXCLUDED.seller_name,
+        specialist_name=EXCLUDED.specialist_name, corporate_contact=EXCLUDED.corporate_contact,
+        construction_contact=EXCLUDED.construction_contact, source_label=EXCLUDED.source_label, updated_at=now()
+      RETURNING id`, [name, hub.city, hub.state, hub.latitude, hub.longitude, batchId,
+      hub.sellerName, hub.specialistName, hub.corporateContact, hub.constructionContact]);
+    await client.query('DELETE FROM region_cities WHERE region_id=$1', [region.rows[0].id]);
+    const uniqueCities = new Map();
+    for (const row of entries) {
+      const key = `${cityKey(row.city)}|${row.state}`;
+      const existing = uniqueCities.get(key);
+      if (!existing || row.coverageType === 'current') uniqueCities.set(key, row);
+    }
     for (const row of uniqueCities.values()) {
       const calculated = haversineKm(hub.latitude, hub.longitude, row.latitude, row.longitude);
       const distance = row.distanceFromHubKm ?? calculated ?? (cityKey(row.city) === cityKey(hub.city) ? 0 : null);
       await client.query(`INSERT INTO region_cities
-        (region_id, city_key, city, state, latitude, longitude, distance_from_hub_km)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        (region_id, city_key, city, state, latitude, longitude, distance_from_hub_km, coverage_type, source_name)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'google_sheet_varejo')
         ON CONFLICT (region_id, city_key, state) DO UPDATE SET city=EXCLUDED.city,
           latitude=coalesce(EXCLUDED.latitude, region_cities.latitude),
           longitude=coalesce(EXCLUDED.longitude, region_cities.longitude),
-          distance_from_hub_km=coalesce(EXCLUDED.distance_from_hub_km, region_cities.distance_from_hub_km), updated_at=now()`,
-      [region.rows[0].id, cityKey(row.city), row.city, row.state, row.latitude, row.longitude, distance]);
+          distance_from_hub_km=coalesce(EXCLUDED.distance_from_hub_km, region_cities.distance_from_hub_km),
+          coverage_type=CASE WHEN region_cities.coverage_type='current' OR EXCLUDED.coverage_type='current' THEN 'current' ELSE 'potential' END,
+          source_name=EXCLUDED.source_name, updated_at=now()`,
+      [region.rows[0].id, cityKey(row.city), row.city, row.state, row.latitude, row.longitude, distance, row.coverageType || 'current']);
     }
   }
 }
@@ -282,6 +439,24 @@ export async function persistImport(client, { sourceType, fileName, requestedShe
     const batchId = created.rows[0].id;
     let accepted = 0, rejected = 0, duplicate = 0;
     const seenCustomerDocuments = new Set();
+    if (sourceType === 'erp') {
+      const prepared = parsed.rows.map((item) => {
+        const notes = validateRow(sourceType, item.normalized);
+        let status = notes.length ? 'rejected' : 'accepted';
+        if (!notes.length && item.normalized.cnpj && seenCustomerDocuments.has(item.normalized.cnpj)) {
+          status = 'duplicate';
+          notes.push('CNPJ repetido nesta carga');
+        }
+        if (item.normalized.cnpj) seenCustomerDocuments.add(item.normalized.cnpj);
+        if (status === 'accepted') accepted += 1;
+        if (status === 'rejected') rejected += 1;
+        if (status === 'duplicate') duplicate += 1;
+        return { rowNumber: item.rowNumber, raw: item.raw, normalized: item.normalized, status, notes };
+      });
+      await bulkUpsertCustomers(client, prepared.filter((item) => item.status === 'accepted').map((item) => item.normalized), batchId);
+      await bulkInsertImportRows(client, prepared, batchId);
+    }
+    if (sourceType !== 'erp') {
     for (const item of parsed.rows) {
       const notes = validateRow(sourceType, item.normalized);
       let status = notes.length ? 'rejected' : 'accepted';
@@ -309,6 +484,7 @@ export async function persistImport(client, { sourceType, fileName, requestedShe
       await client.query(`INSERT INTO import_rows
         (batch_id, row_number, raw_data, normalized_data, validation_status, validation_notes)
         VALUES ($1,$2,$3,$4,$5,$6)`, [batchId, item.rowNumber, item.raw, item.normalized, status, notes]);
+    }
     }
     if (sourceType === 'routes') {
       const validRows = parsed.rows.filter((item) => !validateRow(sourceType, item.normalized).length);

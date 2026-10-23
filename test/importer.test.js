@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
-import { normalizeHeader, parseWorkbook } from '../server/importer.js';
+import { normalizeHeader, parseRetailRouteMatrix, parseWorkbook } from '../server/importer.js';
 
 test('normaliza cabeçalhos em português', () => {
   assert.equal(normalizeHeader('  Razão Social  '), 'razao social');
@@ -75,5 +75,27 @@ test('reconhece região, cidade-polo e coordenadas da planilha de rotas', async 
   assert.equal(parsed.rows[0].normalized.routeName, 'Eixo Norte');
   assert.equal(parsed.rows[0].normalized.hubCity, 'Campinas');
   assert.equal(parsed.rows[1].normalized.distanceFromHubKm, 24);
+});
+
+test('converte a matriz da aba Varejo em regiões e municípios georreferenciados', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Varejo');
+  sheet.addRow(['VAREJO | REGIÕES DE ATENDIMENTO']);
+  sheet.addRow(['VENDEDOR EXTERNO', 'ALESSANDRO']);
+  sheet.addRow(['ESPECIALISTA', 'LEIZ']);
+  sheet.addRow(['CORPORATIVO', 'HELOA']);
+  sheet.addRow(['CONSTRUÇÃO CIVIL', '']);
+  sheet.addRow([]);
+  sheet.addRow(['REGIÃO', 'BRAGANÇA']);
+  sheet.addRow(['CIDADES', 'ATIBAIA']);
+  sheet.addRow([]);
+  sheet.addRow(['MUNICÍPIOS POTENCIAIS', 'BRAGANÇA']);
+  sheet.addRow(['ATÉ 100 KM', 'GUARULHOS (SP)']);
+  const parsed = await parseRetailRouteMatrix(await workbook.xlsx.writeBuffer());
+  assert.equal(parsed.rows.length, 3);
+  assert.deepEqual(parsed.rows.map((item) => item.normalized.coverageType), ['current', 'current', 'potential']);
+  assert.equal(parsed.rows[0].normalized.city, 'Bragança Paulista');
+  assert.equal(parsed.rows[1].normalized.sellerName, 'ALESSANDRO');
+  assert.ok(parsed.rows.every((item) => Number.isFinite(item.normalized.latitude)));
 });
 

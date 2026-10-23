@@ -21,3 +21,9 @@ services:
         sync: false
       - key: SESSION_SECRET
         generateValue: true
+      - key: GOOGLE_SHEET_URL
+        sync: false
+      - key: AUTO_SYNC_GOOGLE_SHEET
+        value: "true"
+      - key: AUTO_SYNC_CUSTOMERS
+        value: "true"
