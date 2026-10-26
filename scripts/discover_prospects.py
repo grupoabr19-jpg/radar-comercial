@@ -22,6 +22,7 @@ from xml.etree import ElementTree
 
 import psycopg
 import requests
+import certifi
 
 from cnae_curation import assess_cnae, related_cnaes
 
@@ -177,7 +178,8 @@ def main() -> None:
     snapshot_date = date.fromisoformat(f"{snapshot}-01")
     print(f"Competencia selecionada: {snapshot}", flush=True)
 
-    connect_options = {"sslrootcert": "system"} if "sslmode=verify-full" in database_url else {}
+    # Use Mozilla's CA bundle while preserving verify-full and hostname validation.
+    connect_options = {"sslrootcert": certifi.where()} if "sslmode=verify-full" in database_url else {}
     with psycopg.connect(database_url, **connect_options) as pg:
         with pg.cursor() as cursor:
             cursor.execute("SELECT cnpj,company_name,city,state FROM erp_customers")
