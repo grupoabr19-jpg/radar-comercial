@@ -1,3 +1,6 @@
+import * as L from 'leaflet';
+import { maplibreGL } from '@maplibre/maplibre-gl-leaflet';
+
 const prospects = [];
 const visits = [];
 const savedDraft = JSON.parse(localStorage.getItem('radar-route-draft') || '[]');
@@ -19,7 +22,7 @@ function prepareLiveUi(){
   const metricNotes=['Fonte externa + cadastro da equipe','Na fila atual','Base de clientes sincronizada','Território atual e expansão'];
   $$('.metric-card').forEach((card,index)=>{const label=$('span',card),note=$('small',card);if(label)label.textContent=metricLabels[index];if(note){note.className='';note.innerHTML=`<em>${metricNotes[index]}</em>`}});
   $('.map-wrap').innerHTML='<div id="overviewMap" class="live-map" aria-label="Mapa real dos territórios comerciais"></div><div class="map-legend"><span><i class="current-dot"></i>Atual</span><span><i class="potential-dot"></i>Expansão</span><span><i class="high-dot"></i>Prospect</span></div>';
-  $('.large-route-map').innerHTML='<div class="map-toolbar"><span><i></i>Mapa geográfico real</span><button data-action="recenter" aria-label="Centralizar"><svg><use href="#icon-focus"></use></svg></button></div><div id="routeMap" class="live-map"></div><div class="route-map-note"><svg><use href="#icon-map"></use></svg><div><strong>Mapa OpenStreetMap</strong><p>Pontos e distâncias calculados com coordenadas reais.</p></div></div>';
+  $('.large-route-map').innerHTML='<div class="map-toolbar"><span><i></i>Mapa geográfico real</span><button data-action="recenter" aria-label="Centralizar"><svg><use href="#icon-focus"></use></svg></button></div><div id="routeMap" class="live-map"></div><div class="route-map-note"><svg><use href="#icon-map"></use></svg><div><strong>Mapa OpenFreeMap</strong><p>Base OpenStreetMap e pontos calculados com coordenadas reais.</p></div></div>';
   const intro=$('#routesView .page-intro');$('h1',intro).textContent='Planejar rota';$('p:not(.eyebrow)',intro).textContent='Selecione uma região, adicione prospects reais e envie os destinos ao Waze.';
   $('.route-actions',intro).innerHTML='<button class="secondary-button" data-action="sync-sheet">Sincronizar planilha</button><button class="secondary-button" data-action="share-whatsapp">Enviar no WhatsApp</button><button class="primary-button" data-action="optimize-route"><svg><use href="#icon-spark"></use></svg>Ordenar por proximidade</button>';
   $('.activity-card').innerHTML='<div class="panel-header"><h2>Origem dos dados</h2></div><div class="activity-row"><span class="activity-icon success"><svg><use href="#icon-check"></use></svg></span><div><strong>Territórios da aba Varejo</strong><p id="regionDataStatus">Aguardando sincronização</p></div></div><div class="activity-row"><span class="activity-icon neutral"><svg><use href="#icon-refresh"></use></svg></span><div><strong>Base de clientes</strong><p id="customerDataStatus">Aguardando sincronização</p></div></div><div class="activity-row"><span class="activity-icon neutral"><svg><use href="#icon-target"></use></svg></span><div><strong>Descoberta por CNAE</strong><p id="discoveryDataStatus">Aguardando primeira execução</p></div></div>';
@@ -28,7 +31,16 @@ function prepareLiveUi(){
   $('.add-stop').innerHTML='<svg><use href="#icon-plus"></use></svg>Adicionar prospect';
   const date=new Date();$('#overviewView .page-intro .eyebrow').textContent=date.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long'}).toUpperCase();$('#overviewView .page-intro h1').textContent='Bom dia, Thiago.';
 }
-function initMaps(){if(!window.L)return;state.overviewMap=L.map('overviewMap',{zoomControl:true}).setView([-22.7,-46.4],7);state.routeMap=L.map('routeMap',{zoomControl:true}).setView([-22.7,-46.4],8);for(const map of [state.overviewMap,state.routeMap])L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);state.overviewLayer=L.layerGroup().addTo(state.overviewMap);state.routeLayer=L.layerGroup().addTo(state.routeMap)}
+function initMaps(){
+  state.overviewMap=L.map('overviewMap',{zoomControl:true,minZoom:1,maxBounds:[[-85,-180],[85,180]],maxBoundsViscosity:1}).setView([-22.7,-46.4],7);
+  state.routeMap=L.map('routeMap',{zoomControl:true,minZoom:1,maxBounds:[[-85,-180],[85,180]],maxBoundsViscosity:1}).setView([-22.7,-46.4],8);
+  for(const map of [state.overviewMap,state.routeMap]){
+    const baseLayer=maplibreGL({style:'https://tiles.openfreemap.org/styles/positron'}).addTo(map);
+    baseLayer.getMaplibreMap().on('error',(event)=>console.error('Falha ao carregar o mapa vetorial:',event.error||event));
+  }
+  state.overviewLayer=L.layerGroup().addTo(state.overviewMap);
+  state.routeLayer=L.layerGroup().addTo(state.routeMap);
+}
 function validPoint(item){return Number.isFinite(Number(item.latitude))&&Number.isFinite(Number(item.longitude))}
 function fitMap(map,points,fallback=[-22.7,-46.4]){if(!map)return;if(!points.length)return map.setView(fallback,7);if(points.length===1)return map.setView(points[0],11);map.fitBounds(points,{padding:[25,25],maxZoom:11})}
 function renderOverviewMap(){if(!state.overviewMap)return;state.overviewLayer.clearLayers();const points=[];for(const region of state.regions){if(Number.isFinite(Number(region.hubLatitude))&&Number.isFinite(Number(region.hubLongitude))){const point=[Number(region.hubLatitude),Number(region.hubLongitude)];points.push(point);L.circleMarker(point,{radius:8,color:'#142758',weight:3,fillColor:'#fff',fillOpacity:1}).bindPopup(`<strong>${html(region.name)}</strong><br>Polo: ${html(region.hubCity)}/${html(region.hubState)}<br>Vendedor: ${html(region.sellerName||'não informado')}`).addTo(state.overviewLayer)}for(const city of region.cities.filter(validPoint)){const point=[Number(city.latitude),Number(city.longitude)];points.push(point);const current=city.source==='current';L.circleMarker(point,{radius:current?4:3,color:current?'#247259':'#c18b36',weight:1,fillOpacity:.75}).bindTooltip(`${html(city.city)}/${html(city.state)} · ${Math.round(city.distanceKm||0)} km`).addTo(state.overviewLayer)}}for(const prospect of prospects.filter(validPoint)){const point=[prospect.latitude,prospect.longitude];points.push(point);L.circleMarker(point,{radius:7,color:'#fff',weight:2,fillColor:'#d9624d',fillOpacity:1}).bindPopup(`<strong>${html(prospect.name)}</strong><br>${html(prospect.segment)}<br><button class="map-detail" data-select="${html(prospect.id)}">Abrir oportunidade</button>`).addTo(state.overviewLayer)}fitMap(state.overviewMap,points)}

@@ -10,6 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/vendor/maplibre/maplibre-gl.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -185,7 +186,15 @@
     <symbol id="icon-spark" viewBox="0 0 24 24"><path d="m12 2 1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5ZM19 16l.7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7Z"/></symbol>
     <symbol id="icon-focus" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs></svg>
-  <script src="/vendor/leaflet/leaflet.js"></script>
-  <script src="/app.js?v=20261023-3"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "leaflet": "/vendor/leaflet/leaflet-src.esm.js",
+        "maplibre-gl": "/vendor/maplibre/maplibre-gl.mjs",
+        "@maplibre/maplibre-gl-leaflet": "/vendor/maplibre-leaflet/leaflet-maplibre-gl.mjs"
+      }
+    }
+  </script>
+  <script type="module" src="/app.js?v=20261026-1"></script>
 </body>
 </html>

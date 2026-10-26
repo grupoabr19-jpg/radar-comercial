@@ -308,6 +308,8 @@ app.get('/login.html', (_req, res) => res.sendFile(path.join(root, 'dist', 'logi
 app.get('/login.js', (_req, res) => res.sendFile(path.join(root, 'dist', 'login.js')));
 app.get('/styles.css', (_req, res) => res.sendFile(path.join(root, 'dist', 'styles.css')));
 app.use('/vendor/leaflet', express.static(path.join(root, 'node_modules', 'leaflet', 'dist'), { maxAge: '30d' }));
+app.use('/vendor/maplibre', express.static(path.join(root, 'node_modules', 'maplibre-gl', 'dist'), { maxAge: '30d' }));
+app.use('/vendor/maplibre-leaflet', express.static(path.join(root, 'node_modules', '@maplibre', 'maplibre-gl-leaflet', 'dist'), { maxAge: '30d' }));
 app.get('/assets/logo-grupo-abr-branca.svg', (_req, res) => res.sendFile(path.join(root, 'dist', 'assets', 'logo-grupo-abr-branca.svg')));
 app.get('/app.js', requirePageAuth, (_req, res) => res.sendFile(path.join(root, 'dist', 'app.js'), {
   headers: { 'Cache-Control': 'no-store, max-age=0' },
