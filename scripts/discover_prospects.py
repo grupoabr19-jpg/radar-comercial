@@ -177,7 +177,8 @@ def main() -> None:
     snapshot_date = date.fromisoformat(f"{snapshot}-01")
     print(f"Competencia selecionada: {snapshot}", flush=True)
 
-    with psycopg.connect(database_url) as pg:
+    connect_options = {"sslrootcert": "system"} if "sslmode=verify-full" in database_url else {}
+    with psycopg.connect(database_url, **connect_options) as pg:
         with pg.cursor() as cursor:
             cursor.execute("SELECT cnpj,company_name,city,state FROM erp_customers")
             customers = cursor.fetchall()
