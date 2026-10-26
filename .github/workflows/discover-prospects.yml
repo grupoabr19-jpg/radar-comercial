@@ -34,6 +34,7 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
+    environment: Variaveis
     timeout-minutes: 360
     env:
       DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
