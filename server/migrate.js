@@ -7,7 +7,14 @@ const { Client } = pg;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export async function migrate() {
-  const connectionString = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+  const directUrl = process.env.DATABASE_URL_UNPOOLED;
+  const directIsValid = (() => {
+    try {
+      const parsed = new URL(directUrl);
+      return parsed.protocol.startsWith('postgres') && parsed.hostname && parsed.hostname !== 'postgresql';
+    } catch { return false; }
+  })();
+  const connectionString = directIsValid ? directUrl : process.env.DATABASE_URL;
   if (!connectionString) throw new Error('DATABASE_URL_UNPOOLED ou DATABASE_URL deve ser configurada.');
   const client = new Client({ connectionString });
   await client.connect();

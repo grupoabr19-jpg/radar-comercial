@@ -27,7 +27,18 @@ try {
       coalesce(sum(records - 1), 0)::int AS duplicate_rows
     FROM (SELECT cnpj, count(*) AS records FROM erp_customers
       WHERE cnpj ~ '^[0-9]{14}$' GROUP BY cnpj HAVING count(*) > 1) duplicates`);
-  console.log(JSON.stringify({ ...profile.rows[0], ...duplicateCnpjs.rows[0], top_cnaes: topCnaes.rows }, null, 2));
+  const activity = await client.query(`SELECT
+    count(*) FILTER (WHERE days_since_last_sale IS NULL)::int AS without_last_sale,
+    count(*) FILTER (WHERE days_since_last_sale <= 180)::int AS sold_within_180_days,
+    count(*) FILTER (WHERE days_since_last_sale > 180)::int AS sold_over_180_days
+    FROM erp_customers`);
+  const purchaseAgeBands = await client.query(`SELECT coalesce(purchase_age_band,'SEM_FAIXA') AS band,
+    count(*)::int AS customers,min(days_since_last_sale)::int AS min_days,max(days_since_last_sale)::int AS max_days
+    FROM erp_customers GROUP BY purchase_age_band ORDER BY count(*) DESC`);
+  const batches = await client.query(`SELECT source_type,file_name,sheet_name,total_rows,accepted_rows,created_at
+    FROM import_batches WHERE status='completed' ORDER BY created_at DESC LIMIT 20`);
+  console.log(JSON.stringify({ ...profile.rows[0], ...duplicateCnpjs.rows[0], ...activity.rows[0],
+    top_cnaes: topCnaes.rows, purchase_age_bands: purchaseAgeBands.rows, batches: batches.rows }, null, 2));
 } finally {
   await client.end();
 }

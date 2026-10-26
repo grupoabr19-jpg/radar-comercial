@@ -94,9 +94,68 @@ app.get('/api/prospects', async (req, res, next) => {
     if (req.query.priority) { values.push(req.query.priority); where.push(`priority = $${values.length}`); }
     const result = await query(`SELECT id, company_name, trade_name, cnpj, primary_cnae, cnae_description,
       segment, city, state, address, latitude, longitude, status, priority, score, confidence, potential_min, potential_max,
-      product_families, score_reasons, assigned_to, updated_at
+      product_families, score_reasons, source_name, assigned_to, updated_at
       FROM prospects WHERE ${where.join(' AND ')} ORDER BY score DESC, updated_at DESC LIMIT 500`, values);
     res.json(result.rows);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/customers', async (req, res, next) => {
+  try {
+    const term = String(req.query.q || '').trim();
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const values = [];
+    const where = [];
+    if (term) {
+      values.push(`%${term}%`);
+      where.push(`(c.company_name ILIKE $${values.length} OR c.customer_code ILIKE $${values.length}
+        OR coalesce(c.cnpj,'') ILIKE $${values.length} OR coalesce(c.city,'') ILIKE $${values.length})`);
+    }
+    values.push(limit);
+    const result = await query(`SELECT c.id,c.customer_code,c.cnpj,c.company_name,c.city,c.state,c.address,
+      c.days_since_last_sale,c.purchase_age_band,c.seller_name,m.latitude,m.longitude,
+      CASE WHEN lower(coalesce(c.purchase_age_band,''))='sem venda' THEN 'inactive'
+        WHEN c.days_since_last_sale < 90 THEN 'active'
+        WHEN c.days_since_last_sale >= 90 THEN 'inactive' ELSE 'unknown' END AS portfolio_status
+      FROM erp_customers c
+      LEFT JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(c.city)) AND m.state=c.state
+      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY CASE WHEN c.days_since_last_sale < 90 THEN 0 ELSE 1 END,c.company_name
+      LIMIT $${values.length}`, values);
+    res.json(result.rows);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/customers/map', async (req, res, next) => {
+  try {
+    const regionId = req.query.regionId ? String(req.query.regionId) : null;
+    const radiusKm = Math.min(250, Math.max(10, Number(req.query.radiusKm) || 50));
+    const limit = Math.min(25000, Math.max(100, Number(req.query.limit) || 12000));
+    const values = [];
+    let coverageJoin;
+    if (regionId) {
+      values.push(regionId, radiusKm);
+      coverageJoin = `JOIN route_regions rr ON rr.id=$1
+        JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(c.city)) AND m.state=c.state
+          AND 6371 * acos(least(1,greatest(-1,
+            cos(radians(rr.hub_latitude::double precision))*cos(radians(m.latitude::double precision))*
+            cos(radians(m.longitude::double precision)-radians(rr.hub_longitude::double precision))+
+            sin(radians(rr.hub_latitude::double precision))*sin(radians(m.latitude::double precision))))) <= $2`;
+    } else {
+      coverageJoin = `JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(c.city)) AND m.state=c.state
+        WHERE EXISTS (SELECT 1 FROM region_cities rc
+          WHERE lower(btrim(rc.city))=lower(btrim(c.city)) AND rc.state=c.state)`;
+    }
+    values.push(limit);
+    const result = await query(`SELECT c.id,c.customer_code,c.cnpj,c.company_name,c.city,c.state,c.address,
+      c.days_since_last_sale,c.purchase_age_band,c.seller_name,m.latitude,m.longitude,
+      CASE WHEN lower(coalesce(c.purchase_age_band,''))='sem venda' THEN 'inactive'
+        WHEN c.days_since_last_sale < 90 THEN 'active'
+        WHEN c.days_since_last_sale >= 90 THEN 'inactive' ELSE 'unknown' END AS portfolio_status
+      FROM erp_customers c ${coverageJoin}
+      ORDER BY CASE WHEN c.days_since_last_sale < 90 THEN 0 ELSE 1 END,c.company_name
+      LIMIT $${values.length}`, values);
+    res.json({ rows: result.rows, limit, truncated: result.rowCount === limit, locationAccuracy: 'municipality_center' });
   } catch (error) { next(error); }
 });
 
@@ -145,7 +204,7 @@ app.get('/api/prospects/nearby', async (req, res, next) => {
       return res.status(400).json({ error: 'Coordenadas inválidas.' });
     }
     const result = await query(`WITH located AS (
-      SELECT id, company_name, trade_name, cnpj, segment, city, state, address, status, priority,
+      SELECT id, company_name, trade_name, cnpj, segment, city, state, address, latitude, longitude, status, priority,source_name,
         score, confidence, potential_min, potential_max, product_families, score_reasons,
         6371 * acos(least(1, greatest(-1,
           cos(radians($1)) * cos(radians(latitude::double precision)) *

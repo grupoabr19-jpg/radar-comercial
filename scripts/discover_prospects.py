@@ -44,9 +44,22 @@ def clean_cnpj(value: str | None) -> str:
 
 def webdav(session: requests.Session, token: str, path: str = "", depth: int = 1) -> requests.Response:
     url = f"{RFB_WEBDAV}/{quote(path.strip('/'), safe='/')}" if path else RFB_WEBDAV
-    response = session.request("PROPFIND", url, auth=(token, ""), headers={"Depth": str(depth)}, timeout=90)
-    response.raise_for_status()
-    return response
+    for attempt in range(1, 6):
+        try:
+            response = session.request("PROPFIND", url, auth=(token, ""),
+                                       headers={"Depth": str(depth)}, timeout=180)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            if status is not None and status < 500 and status != 429:
+                raise RuntimeError(f"Recurso da Receita Federal indisponivel ({status}): {url}") from error
+            if attempt == 5:
+                raise RuntimeError(f"Receita Federal indisponivel apos 5 tentativas: {error}") from error
+            wait = attempt * 15
+            print(f"Consulta de competencia indisponivel; nova tentativa em {wait}s ({attempt + 1}/5).", flush=True)
+            time.sleep(wait)
+    raise RuntimeError("Falha inesperada ao consultar competencias da Receita Federal.")
 
 
 def list_webdav(session: requests.Session, token: str, path: str = "") -> list[str]:
@@ -65,10 +78,18 @@ def latest_snapshot(session: requests.Session, token: str) -> str:
         if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", requested):
             raise ValueError("RFB_SNAPSHOT deve estar no formato AAAA-MM.")
         return requested
-    snapshots = [name for name in list_webdav(session, token) if re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", name)]
-    if not snapshots:
-        raise RuntimeError("Nenhuma competencia AAAA-MM encontrada no compartilhamento da Receita.")
-    return snapshots[-1]
+    today = date.today()
+    month_index = today.year * 12 + today.month - 1
+    for offset in range(12):
+        candidate_index = month_index - offset
+        candidate = f"{candidate_index // 12:04d}-{candidate_index % 12 + 1:02d}"
+        try:
+            webdav(session, token, candidate, depth=0)
+            print(f"Competencia disponivel encontrada diretamente: {candidate}", flush=True)
+            return candidate
+        except RuntimeError as error:
+            print(f"Competencia {candidate} indisponivel: {error}", flush=True)
+    raise RuntimeError("Nenhuma competencia mensal recente foi encontrada na Receita Federal.")
 
 
 def download(session: requests.Session, token: str, snapshot: str, filename: str, target: Path) -> None:
