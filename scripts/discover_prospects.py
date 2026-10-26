@@ -23,6 +23,8 @@ from xml.etree import ElementTree
 import psycopg
 import requests
 
+from cnae_curation import assess_cnae, related_cnaes
+
 
 RFB_HOST = "https://arquivos.receitafederal.gov.br"
 RFB_WEBDAV = f"{RFB_HOST}/public.php/webdav"
@@ -123,11 +125,11 @@ def prepare_stage(path: Path) -> sqlite3.Connection:
       coverage_type TEXT NOT NULL, phone TEXT, email TEXT
     )""")
     db.execute("CREATE INDEX establishments_cnae_idx ON establishments(cnae)")
+    db.execute("""CREATE TABLE cnae_targets (
+      cnae TEXT PRIMARY KEY, seed_cnae TEXT NOT NULL, match_type TEXT NOT NULL,
+      similarity_weight REAL NOT NULL, customer_count INTEGER NOT NULL
+    )""")
     return db
-
-
-def select_target_cnaes(counts: Counter, maximum: int, minimum: int) -> list[tuple[str, int]]:
-    return [(cnae, count) for cnae, count in counts.most_common(maximum) if count >= minimum]
 
 
 def score_for(customer_count: int, coverage_type: str, size: str) -> int:
@@ -221,33 +223,78 @@ def main() -> None:
                         target.unlink(missing_ok=True)
 
                 cnae_counts.update(customer_cnaes.values())
-                targets = select_target_cnaes(cnae_counts, max_cnaes, min_customers)
-                if not targets:
-                    raise RuntimeError("Nenhum CNAE atingiu a quantidade minima de clientes conhecidos.")
-                target_counts = dict(targets)
-                placeholders = ",".join("?" for _ in targets)
-                stage.execute(f"DELETE FROM establishments WHERE cnae NOT IN ({placeholders})", [item[0] for item in targets])
-                stage.commit()
-                regional_count = stage.execute("SELECT count(*) FROM establishments").fetchone()[0]
+                if not cnae_counts:
+                    raise RuntimeError("Nenhum CNAE foi encontrado para os CNPJs validos da carteira.")
+                top_customer_count = cnae_counts.most_common(1)[0][1]
+                assessments = [
+                    assess_cnae(cnae, cnae_descriptions.get(cnae), count, len(customer_cnaes),
+                                top_customer_count, min_customers)
+                    for cnae, count in cnae_counts.most_common()
+                ]
 
                 with pg.cursor() as cursor:
                     cursor.executemany("UPDATE erp_customers SET primary_cnae=%s,cnae_source_date=%s WHERE cnpj=%s",
                                        [(cnae, snapshot_date, cnpj) for cnpj, cnae in customer_cnaes.items()])
                     cursor.executemany("""INSERT INTO prospecting_cnaes
-                      (cnae,description,weight,source_customer_count,source_name)
-                      VALUES (%s,%s,%s,%s,'erp_frequency')
-                      ON CONFLICT(cnae) DO UPDATE SET description=excluded.description,weight=excluded.weight,
-                        source_customer_count=excluded.source_customer_count,updated_at=now()""",
-                      [(cnae, cnae_descriptions.get(cnae), count / max(1, targets[0][1]), count) for cnae, count in targets])
-                    cursor.execute("UPDATE discovery_runs SET matched_customers=%s,target_cnaes=%s,regional_companies=%s WHERE id=%s",
-                                   (len(customer_cnaes), len(targets), regional_count, run_id))
+                      (cnae,description,enabled,weight,source_customer_count,source_name,review_status,
+                       fit_score,customer_share,rationale,curation_source)
+                      VALUES (%s,%s,%s,%s,%s,'erp_frequency',%s,%s,%s,%s::jsonb,'heuristic')
+                      ON CONFLICT(cnae) DO UPDATE SET description=excluded.description,
+                        source_customer_count=excluded.source_customer_count,customer_share=excluded.customer_share,
+                        updated_at=now(),
+                        enabled=CASE WHEN prospecting_cnaes.curation_source='manual' THEN prospecting_cnaes.enabled ELSE excluded.enabled END,
+                        weight=CASE WHEN prospecting_cnaes.curation_source='manual' THEN prospecting_cnaes.weight ELSE excluded.weight END,
+                        review_status=CASE WHEN prospecting_cnaes.curation_source='manual' THEN prospecting_cnaes.review_status ELSE excluded.review_status END,
+                        fit_score=CASE WHEN prospecting_cnaes.curation_source='manual' THEN prospecting_cnaes.fit_score ELSE excluded.fit_score END,
+                        rationale=CASE WHEN prospecting_cnaes.curation_source='manual' THEN prospecting_cnaes.rationale ELSE excluded.rationale END,
+                        curation_source=CASE WHEN prospecting_cnaes.curation_source='manual' THEN prospecting_cnaes.curation_source ELSE excluded.curation_source END""",
+                      [(item.cnae, item.description, item.review_status == "approved", item.fit_score / 100,
+                        item.customer_count, item.review_status, item.fit_score, item.customer_share,
+                        json.dumps(item.reasons, ensure_ascii=False)) for item in assessments])
+                    cursor.execute("""SELECT cnae,source_customer_count,weight FROM prospecting_cnaes
+                      WHERE enabled=true AND review_status='approved'
+                      ORDER BY fit_score DESC,source_customer_count DESC,cnae LIMIT %s""", (max_cnaes,))
+                    approved_seeds = cursor.fetchall()
+                    if not approved_seeds:
+                        raise RuntimeError("A curadoria nao aprovou CNAEs; revise os itens pendentes antes da descoberta.")
+
+                    match_rows = []
+                    for seed_cnae, customer_count, seed_weight in approved_seeds:
+                        for candidate, description, match_type, similarity_weight in related_cnaes(seed_cnae, cnae_descriptions):
+                            match_rows.append((seed_cnae, candidate, description, match_type,
+                                               float(seed_weight) * similarity_weight, customer_count))
+                    cursor.execute("DELETE FROM prospecting_cnae_matches")
+                    cursor.executemany("""INSERT INTO prospecting_cnae_matches
+                      (seed_cnae,candidate_cnae,candidate_description,match_type,similarity_weight,enabled)
+                      VALUES (%s,%s,%s,%s,%s,true)""",
+                      [(seed, candidate, description, match_type, weight)
+                       for seed, candidate, description, match_type, weight, _count in match_rows])
                 pg.commit()
 
-                selected = stage.execute(f"""SELECT cnpj,cnpj_root,trade_name,cnae,opened_at,address,postal_code,
-                    city,state,coverage_type,phone,email FROM establishments
-                  ORDER BY CASE coverage_type WHEN 'current' THEN 0 ELSE 1 END,
-                    CASE cnae {' '.join(f'WHEN ? THEN {index}' for index, _ in enumerate(targets))} ELSE 999 END,
-                    opened_at DESC LIMIT ?""", [item[0] for item in targets] + [max_prospects]).fetchall()
+                best_matches = {}
+                for seed, candidate, description, match_type, weight, customer_count in match_rows:
+                    current = best_matches.get(candidate)
+                    if current is None or weight * customer_count > current[3] * current[4]:
+                        best_matches[candidate] = (seed, description, match_type, weight, customer_count)
+                stage.executemany("INSERT OR REPLACE INTO cnae_targets VALUES (?,?,?,?,?)",
+                                  [(candidate, seed, match_type, weight, customer_count)
+                                   for candidate, (seed, _description, match_type, weight, customer_count) in best_matches.items()])
+                stage.execute("DELETE FROM establishments WHERE NOT EXISTS (SELECT 1 FROM cnae_targets WHERE cnae_targets.cnae=establishments.cnae)")
+                stage.commit()
+                regional_count = stage.execute("SELECT count(*) FROM establishments").fetchone()[0]
+
+                with pg.cursor() as cursor:
+                    cursor.execute("""UPDATE discovery_runs SET matched_customers=%s,target_cnaes=%s,
+                      related_cnaes=%s,regional_companies=%s WHERE id=%s""",
+                      (len(customer_cnaes), len(approved_seeds), len(best_matches), regional_count, run_id))
+                pg.commit()
+
+                selected = stage.execute("""SELECT e.cnpj,e.cnpj_root,e.trade_name,e.cnae,e.opened_at,e.address,
+                    e.postal_code,e.city,e.state,e.coverage_type,e.phone,e.email,t.seed_cnae,t.match_type,
+                    t.similarity_weight,t.customer_count
+                  FROM establishments e JOIN cnae_targets t ON t.cnae=e.cnae
+                  ORDER BY CASE e.coverage_type WHEN 'current' THEN 0 ELSE 1 END,
+                    (t.similarity_weight * t.customer_count) DESC,e.opened_at DESC LIMIT ?""", (max_prospects,)).fetchall()
                 selected_roots = {row[1] for row in selected}
                 companies: dict[str, tuple[str, str, str]] = {}
                 for filename in COMPANY_FILES:
@@ -267,7 +314,8 @@ def main() -> None:
                     records = []
                     skipped_by_name = 0
                     for item in selected:
-                        cnpj, root, trade, cnae, opened, address, cep, city, state, coverage, phone, email = item
+                        (cnpj, root, trade, cnae, opened, address, cep, city, state, coverage, phone, email,
+                         seed_cnae, match_type, similarity_weight, customer_count) = item
                         company_name, size, _capital = companies.get(root, (trade or f"Empresa {cnpj}", "00", "0"))
                         if ((normalized(company_name), normalized(city), state) in known_name_places or
                                 (trade and (normalized(trade), normalized(city), state) in known_name_places)):
@@ -275,13 +323,15 @@ def main() -> None:
                             continue
                         coordinates = city_coordinates.get((normalized(city), state), (None, None))
                         reasons = [
-                            f"CNAE presente em {target_counts[cnae]} clientes cadastrados no ERP",
+                            (f"CNAE presente em {customer_count} clientes cadastrados no ERP" if match_type == "exact"
+                             else f"CNAE da mesma classe economica do CNAE {seed_cnae}, presente em {customer_count} clientes"),
                             f"Empresa ativa em cidade de cobertura {coverage} da rota",
                             "CNPJ nao encontrado na base atual nem em grupo empresarial ja atendido",
                         ]
                         records.append((cnpj, company_name, trade or None, cnae, cnae_descriptions.get(cnae), city, state,
                                         cep or None, address or None, coordinates[0], coordinates[1], size or None,
-                                        opened or None, snapshot_date, score_for(target_counts[cnae], coverage, size),
+                                        opened or None, snapshot_date,
+                                        round(score_for(customer_count, coverage, size) * float(similarity_weight)),
                                         json.dumps(reasons, ensure_ascii=False)))
                     cursor.executemany("""INSERT INTO prospects
                       (cnpj,company_name,trade_name,primary_cnae,cnae_description,segment,city,state,postal_code,address,
@@ -303,7 +353,8 @@ def main() -> None:
                 pg.commit()
                 stage.close()
                 print(json.dumps({"snapshot": snapshot, "knownCustomers": len(customers),
-                                  "matchedCustomers": len(customer_cnaes), "targetCnaes": len(targets),
+                                  "matchedCustomers": len(customer_cnaes), "observedCnaes": len(assessments),
+                                  "approvedCnaes": len(approved_seeds), "relatedCnaes": len(best_matches),
                                   "regionalCompanies": regional_count, "prospectsLoaded": len(records),
                                   "skippedByNameAndCity": skipped_by_name}), flush=True)
         except Exception as error:

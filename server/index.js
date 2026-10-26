@@ -74,6 +74,8 @@ app.get('/api/dashboard', async (_req, res, next) => {
       (SELECT count(*)::int FROM erp_customers) AS customers,
       (SELECT count(*)::int FROM erp_customers WHERE primary_cnae IS NOT NULL) AS customers_with_cnae,
       (SELECT count(*)::int FROM prospecting_cnaes WHERE enabled) AS target_cnaes,
+      (SELECT count(*)::int FROM prospecting_cnaes WHERE review_status='pending') AS pending_cnaes,
+      (SELECT count(DISTINCT candidate_cnae)::int FROM prospecting_cnae_matches WHERE enabled) AS related_cnaes,
       (SELECT count(*)::int FROM route_regions WHERE source_batch_id IS NOT NULL) AS synced_regions,
       (SELECT count(*)::int FROM region_cities WHERE source_name='google_sheet_varejo') AS mapped_cities,
       (SELECT max(completed_at) FROM import_batches WHERE status='completed') AS last_sync,
@@ -90,11 +92,47 @@ app.get('/api/prospects', async (req, res, next) => {
     const where = ["status <> 'do_not_contact'"];
     if (req.query.q) { values.push(`%${req.query.q}%`); where.push(`(company_name ILIKE $${values.length} OR city ILIKE $${values.length} OR cnpj ILIKE $${values.length})`); }
     if (req.query.priority) { values.push(req.query.priority); where.push(`priority = $${values.length}`); }
-    const result = await query(`SELECT id, company_name, trade_name, cnpj, segment, city, state,
-      address, status, priority, score, confidence, potential_min, potential_max,
+    const result = await query(`SELECT id, company_name, trade_name, cnpj, primary_cnae, cnae_description,
+      segment, city, state, address, latitude, longitude, status, priority, score, confidence, potential_min, potential_max,
       product_families, score_reasons, assigned_to, updated_at
       FROM prospects WHERE ${where.join(' AND ')} ORDER BY score DESC, updated_at DESC LIMIT 500`, values);
     res.json(result.rows);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/cnaes', async (_req, res, next) => {
+  try {
+    const result = await query(`SELECT c.cnae,c.description,c.review_status,c.enabled,c.fit_score,
+      c.customer_share,c.source_customer_count,c.rationale,c.curation_source,c.reviewed_at,
+      c.reviewed_by,c.review_notes,
+      count(m.candidate_cnae) FILTER (WHERE m.enabled)::int AS related_count
+      FROM prospecting_cnaes c
+      LEFT JOIN prospecting_cnae_matches m ON m.seed_cnae=c.cnae
+      GROUP BY c.cnae,c.description,c.review_status,c.enabled,c.fit_score,c.customer_share,
+        c.source_customer_count,c.rationale,c.curation_source,c.reviewed_at,c.reviewed_by,c.review_notes
+      ORDER BY CASE c.review_status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+        c.fit_score DESC,c.source_customer_count DESC,c.cnae`);
+    res.json(result.rows);
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/cnaes/:cnae', async (req, res, next) => {
+  try {
+    const cnae = String(req.params.cnae || '').replace(/\D/g, '');
+    const reviewStatus = String(req.body.reviewStatus || '');
+    const reviewNotes = req.body.reviewNotes == null ? null : String(req.body.reviewNotes).trim().slice(0, 500);
+    if (cnae.length !== 7) return res.status(400).json({ error: 'CNAE inválido.' });
+    if (!['approved', 'rejected', 'pending'].includes(reviewStatus)) {
+      return res.status(400).json({ error: 'Decisão de curadoria inválida.' });
+    }
+    const result = await query(`UPDATE prospecting_cnaes SET review_status=$2,enabled=($2='approved'),
+      curation_source='manual',reviewed_at=now(),reviewed_by=$3,review_notes=$4,updated_at=now()
+      WHERE cnae=$1 RETURNING *`, [cnae, reviewStatus, req.user.email, reviewNotes]);
+    if (!result.rowCount) return res.status(404).json({ error: 'CNAE não encontrado na curadoria.' });
+    await query(`INSERT INTO audit_events(actor_email,action,entity_type,entity_id,metadata)
+      VALUES ($1,'review_cnae','prospecting_cnae',$2,$3)`,
+    [req.user.email, cnae, { reviewStatus, reviewNotes }]);
+    res.json(result.rows[0]);
   } catch (error) { next(error); }
 });
 
