@@ -603,7 +603,7 @@ app.post('/api/routes', async (req, res, next) => {
       (name, route_date, seller_name, region_id, status, created_by,
        origin_name,origin_city,origin_state,origin_latitude,origin_longitude,
        destination_name,destination_city,destination_state,destination_latitude,destination_longitude)
-      VALUES ($1,$2,$3,$4,'ready',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+      VALUES ($1,$2,$3,$4,'ready',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
     [name, routeDate, sellerName, regionId || null, req.user.email,
       origin?.name || null, origin?.city || null, origin?.state || null, origin?.latitude ?? null, origin?.longitude ?? null,
       destination?.name || null, destination?.city || null, destination?.state || null,
