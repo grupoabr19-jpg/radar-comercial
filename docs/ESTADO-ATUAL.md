@@ -96,7 +96,9 @@ A migração `007_market_segments_and_route_endpoints.sql` ainda não foi aplica
 
 O enriquecimento é feito em lotes pequenos e retomáveis. A reconciliação de nomes associa os clientes da Tabela 1 aos CNAEs da Tabela 2; relações CNAE–segmento são derivadas desses clientes de referência, sem presumir que a planilha forneça CNAEs. O script da Receita consulta os CNAEs principal e secundários desses clientes, encontra estabelecimentos na cobertura das regiões e grava a origem `Descoberta por CNAE/Lookalike`. O prospect recebe o segmento do cliente espelho quando há uma associação não ambígua; conflitos permanecem sem classificação automática.
 
-As alterações de mapa e roteamento que já constam no repositório foram mantidas: tooltip com dados/segmento/status, identificação visual por tipo, sugestões geográficas A–B, inclusão manual e compartilhamento por WhatsApp/Google Maps. Os pontos municipais e o corredor A–B são aproximações, não uma malha viária real.
+As alterações de mapa e roteamento que já constam no repositório foram mantidas: tooltip com dados/segmento/status, identificação visual por tipo, sugestões geográficas A–B, inclusão manual e compartilhamento por WhatsApp com um link Waze individual para cada parada ordenada. O motorista abre cada link para navegar à próxima visita. Os pontos municipais e o corredor A–B são aproximações, não uma malha viária real.
+
+O registro de visita também permite anexar opcionalmente a localização atual do celular e uma foto. A posição é capturada somente após ação explícita e consentimento do navegador; a imagem JPG, PNG ou WebP é limitada a 5 MB e guardada no PostgreSQL, em uma tabela separada. A foto só é entregue pela API autenticada.
 
 Antes de executar a migração ou o enriquecimento em produção, instalar as dependências Node do projeto, rodar a suíte de testes, revisar a migração em ambiente de teste e confirmar a execução controlada dos lotes. Nenhuma migração foi executada nem nenhuma chamada em massa à BrasilAPI foi iniciada durante esta implementação.
 

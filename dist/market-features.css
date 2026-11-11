@@ -26,5 +26,10 @@
 .segment-mapping-list{display:grid;gap:7px;max-height:300px;overflow:auto}
 .segment-mapping-row{display:grid;grid-template-columns:100px 1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:9px;font-size:10px}
 .segment-mapping-row small{color:var(--muted)}
+.visit-capture-fields{margin-top:12px}
+.visit-location-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.visit-location-controls small,.visit-capture-fields .form-field>small{color:var(--muted);font-size:9px}
+.visit-capture-fields input[type=file]{padding:8px}
+.visit-evidence-link{display:inline-block;margin:3px 8px 0 0;color:#315b9b;font-size:9px;font-weight:700}
 @media(max-width:900px){.route-builder-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.route-builder-controls button{grid-column:span 2}}
 @media(max-width:600px){.route-endpoints{grid-template-columns:1fr 72px}.route-endpoints label:nth-child(3){grid-column:1}.route-endpoints label:nth-child(4){grid-column:2;grid-row:2}.route-suggestion{align-items:flex-start;flex-direction:column}.route-suggestion button{width:100%}.segment-mapping-form{grid-template-columns:1fr}.segment-mapping-row{grid-template-columns:1fr}.route-builder-footer{flex-direction:column}.route-builder-footer button{width:100%}}

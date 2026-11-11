@@ -12,7 +12,7 @@
     "dev": "node --env-file-if-exists=.env --watch server/index.js",
     "migrate": "node server/migrate.js",
     "enrich:cnae": "node --env-file-if-exists=.env scripts/enrich_customers_cnae.js",
-    "test": "node test/auth.test.js && node test/google-sheet.test.js && node test/brasil-api.test.js && node test/importer.test.js && node test/navigation.test.js"
+    "test": "node test/auth.test.js && node test/google-sheet.test.js && node test/brasil-api.test.js && node test/importer.test.js && node test/navigation.test.js && node test/visit-media.test.js"
   },
   "dependencies": {
     "@maplibre/maplibre-gl-leaflet": "^0.1.4",

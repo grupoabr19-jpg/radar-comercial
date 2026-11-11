@@ -37,10 +37,14 @@ O seletor de raio mostra:
 - cidades adicionais com coordenadas conhecidas que estejam dentro do raio;
 - quantidade de prospects encontrados nessas cidades ou geograficamente dentro do raio.
 
-O Waze aceita somente um destino por deep link. Por isso, uma rota com várias visitas é compartilhada como uma sequência numerada de links: cada parada possui **Abrir no Waze**, e o botão de WhatsApp envia o roteiro completo com um link por trecho. Coordenadas são usadas preferencialmente; na ausência delas, o sistema envia o endereço para pesquisa no Waze.
+O Waze aceita somente um destino por deep link. Por isso, o botão de WhatsApp envia a rota como uma sequência numerada, com um link Waze individual em cada visita. O vendedor abre o link da primeira parada e, ao concluir, seleciona o próximo link da mensagem. Coordenadas são usadas preferencialmente; na ausência delas, o link pesquisa o nome e o endereço da empresa no Waze.
 
 ## Geolocalização do vendedor
 
 Na tela **Planejar rota**, o botão **Usar minha localização** solicita ao navegador a posição atual do dispositivo. A aplicação usa latitude e longitude somente para consultar prospects no raio selecionado; a posição do vendedor não é armazenada no banco e não há rastreamento contínuo.
 
 O recurso exige HTTPS (ou `localhost`) e permissão explícita do usuário. Para que a busca retorne resultados, os prospects também precisam estar geocodificados, com latitude e longitude. O Waze utiliza a posição atual do dispositivo como origem e cada visita compartilhada como destino.
+
+## Evidências de visita
+
+No formulário **Registrar visita**, o vendedor pode capturar a geolocalização do celular e anexar uma foto; ambos são opcionais. A localização é solicitada apenas ao tocar em **Capturar minha localização**, requer HTTPS e permissão do navegador, e é armazenada com a precisão informada pelo dispositivo. A foto aceita JPG, PNG ou WebP de até 5 MB, é validada no servidor e armazenada em `visit_photos` no PostgreSQL. O acesso às imagens passa pela API autenticada; excluir uma visita também exclui sua foto.

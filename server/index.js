@@ -15,11 +15,25 @@ import { lookupCep, lookupCnpj } from './brasil-api.js';
 import { findMunicipality } from './municipalities.js';
 import { enrichCustomersCnae } from './cnae-enrichment.js';
 import { listSegments, reconcileReferenceSegmentMappings, reviewCnaeSegment } from './segments.js';
+import { detectVisitPhotoContentType, MAX_VISIT_PHOTO_BYTES, VISIT_PHOTO_TYPES } from './visit-media.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultGoogleSheetUrl = 'https://docs.google.com/spreadsheets/d/18WarJapxqvW4s61k5rjE4qTGsDorr29rJ9QkOG0IO2M/edit';
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 1 } });
+const visitPhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_VISIT_PHOTO_BYTES, files: 1 },
+  fileFilter(_req, file, callback) {
+    if (!VISIT_PHOTO_TYPES.has(file.mimetype)) {
+      const error = new Error('A foto deve estar no formato JPG, PNG ou WebP.');
+      error.status = 400;
+      callback(error);
+      return;
+    }
+    callback(null, true);
+  },
+});
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -373,22 +387,84 @@ app.get('/api/lookup/cnpj/:cnpj', async (req, res, next) => {
 
 app.get('/api/visits', async (_req, res, next) => {
   try {
-    const result = await query(`SELECT id, prospect_id, company_name, city, seller_name,
-      visited_at, result, next_action, notes FROM visits ORDER BY visited_at DESC LIMIT 250`);
+    const result = await query(`SELECT visit.id,visit.prospect_id,visit.company_name,visit.city,visit.seller_name,
+      visit.visited_at,visit.result,visit.next_action,visit.notes,visit.latitude,visit.longitude,
+      visit.location_accuracy_m,
+      EXISTS (SELECT 1 FROM visit_photos photo WHERE photo.visit_id=visit.id) AS has_photo
+      FROM visits visit ORDER BY visit.visited_at DESC LIMIT 250`);
     res.json(result.rows);
   } catch (error) { next(error); }
 });
 
-app.post('/api/visits', async (req, res, next) => {
+app.get('/api/visits/:visitId/photo', async (req, res, next) => {
   try {
-    const { prospectId, companyName, city, sellerName, result, nextAction, notes } = req.body;
-    if (!companyName || !result) return res.status(400).json({ error: 'Empresa e resultado são obrigatórios.' });
-    const inserted = await query(`INSERT INTO visits
-      (prospect_id, company_name, city, seller_name, result, next_action, notes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-    [prospectId || null, companyName, city, sellerName || req.user.email, result, nextAction, notes]);
-    res.status(201).json(inserted.rows[0]);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.visitId)) {
+      return res.status(400).json({ error: 'Identificador de visita inválido.' });
+    }
+    const photo = await query('SELECT content_type,photo_data FROM visit_photos WHERE visit_id=$1', [req.params.visitId]);
+    if (!photo.rowCount) return res.status(404).json({ error: 'Esta visita não possui foto.' });
+    res.set('Content-Type', photo.rows[0].content_type);
+    res.set('Cache-Control', 'private, no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.send(photo.rows[0].photo_data);
   } catch (error) { next(error); }
+});
+
+app.post('/api/visits', visitPhotoUpload.single('photo'), async (req, res, next) => {
+  const body = req.body || {};
+  const { prospectId, companyName, city, sellerName, result, nextAction, notes } = body;
+  const latitudeProvided = body.latitude != null && body.latitude !== '';
+  const longitudeProvided = body.longitude != null && body.longitude !== '';
+  if (latitudeProvided !== longitudeProvided) {
+    return res.status(400).json({ error: 'A localização deve incluir latitude e longitude.' });
+  }
+  const latitude = latitudeProvided ? Number(body.latitude) : null;
+  const longitude = longitudeProvided ? Number(body.longitude) : null;
+  if ((latitudeProvided && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90))
+    || (longitudeProvided && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180))) {
+    return res.status(400).json({ error: 'As coordenadas da localização são inválidas.' });
+  }
+  const accuracyProvided = body.locationAccuracy != null && body.locationAccuracy !== '';
+  const locationAccuracy = accuracyProvided ? Number(body.locationAccuracy) : null;
+  if (accuracyProvided && !latitudeProvided) {
+    return res.status(400).json({ error: 'A precisão só pode ser informada junto com a localização.' });
+  }
+  if (accuracyProvided && (!Number.isFinite(locationAccuracy) || locationAccuracy < 0)) {
+    return res.status(400).json({ error: 'A precisão da localização é inválida.' });
+  }
+  if (!String(companyName || '').trim() || !String(result || '').trim()) {
+    return res.status(400).json({ error: 'Empresa e resultado são obrigatórios.' });
+  }
+  if (req.file && detectVisitPhotoContentType(req.file.buffer) !== req.file.mimetype) {
+    return res.status(400).json({ error: 'O conteúdo da foto não corresponde a um JPG, PNG ou WebP válido.' });
+  }
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const inserted = await client.query(`INSERT INTO visits
+        (prospect_id,company_name,city,seller_name,result,next_action,notes,
+         latitude,longitude,location_accuracy_m,location_captured_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,CASE WHEN $8 IS NULL THEN NULL ELSE now() END)
+      RETURNING *`,
+    [prospectId || null, String(companyName).trim(), city || null, sellerName || req.user.email, String(result).trim(),
+      nextAction || null, notes || null, latitude, longitude, locationAccuracy]);
+    if (req.file) {
+      await client.query(`INSERT INTO visit_photos(visit_id,content_type,photo_data,file_size)
+        VALUES ($1,$2,$3,$4)`,
+      [inserted.rows[0].id, req.file.mimetype, req.file.buffer, req.file.size]);
+    }
+    await client.query('COMMIT');
+    res.status(201).json(inserted.rows[0]);
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('Falha ao reverter o registro da visita:', rollbackError);
+    }
+    next(error);
+  } finally {
+    client.release();
+  }
 });
 
 app.post('/api/imports', upload.single('file'), async (req, res, next) => {
@@ -658,7 +734,11 @@ app.use(requirePageAuth, express.static(path.join(root, 'dist'), { index: false,
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Arquivo maior que 30 MB.' });
+  if (error.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      error: error.field === 'photo' ? 'A foto deve ter no máximo 5 MB.' : 'Arquivo maior que 30 MB.',
+    });
+  }
   if (error.code === '23505') return res.status(409).json({ error: 'Já existe um registro com esse identificador.' });
   const status = Number(error.status) || 500;
   res.status(status).json({ error: status >= 500 && process.env.NODE_ENV === 'production' ? 'Serviço temporariamente indisponível.' : error.message });

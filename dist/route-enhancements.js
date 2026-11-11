@@ -4,6 +4,7 @@ let candidateSearchResults = [];
 let segmentData = { taxonomy: [], mappings: [] };
 let searchTimer;
 let searchRequest = 0;
+const MAX_VISIT_PHOTO_BYTES = 5 * 1024 * 1024;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, (char) => ({
@@ -13,6 +14,59 @@ const validPoint = (item) => item?.latitude != null && item.latitude !== ''
   && item?.longitude != null && item.longitude !== ''
   && Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude));
 const stateName = (prefix) => $(`#${prefix}State`).value.trim().toUpperCase();
+
+function installVisitCaptureFields() {
+  const form = $('#visitForm');
+  if (!form || form.dataset.captureFieldsInstalled) return;
+  const footer = $('.modal-footer', form);
+  if (!footer) return;
+  const submitButton = $('button.primary-button', form);
+  if (submitButton && !submitButton.hasAttribute('type')) submitButton.type = 'submit';
+  footer.insertAdjacentHTML('beforebegin', `<div class="form-grid visit-capture-fields">
+    <div class="form-field full">
+      <label>Localização do celular (opcional)</label>
+      <div class="visit-location-controls">
+        <button class="secondary-button" type="button" data-visit-action="capture-location">Capturar minha localização</button>
+        <small id="visitLocationStatus" aria-live="polite">A localização só é capturada quando você tocar no botão.</small>
+      </div>
+      <input type="hidden" name="latitude">
+      <input type="hidden" name="longitude">
+      <input type="hidden" name="locationAccuracy">
+    </div>
+    <div class="form-field full">
+      <label for="visitPhotoInput">Foto da visita (opcional)</label>
+      <input id="visitPhotoInput" name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment">
+      <small id="visitPhotoStatus" aria-live="polite">JPG, PNG ou WebP, até 5 MB.</small>
+    </div>
+  </div>`);
+  form.dataset.captureFieldsInstalled = 'true';
+}
+
+function captureVisitLocation(button) {
+  const form = $('#visitForm');
+  const status = $('#visitLocationStatus');
+  if (!form || !status) return;
+  if (!window.isSecureContext || !navigator.geolocation) {
+    status.textContent = 'A localização exige HTTPS e suporte à geolocalização neste dispositivo.';
+    return;
+  }
+  button.disabled = true;
+  status.textContent = 'Obtendo localização…';
+  navigator.geolocation.getCurrentPosition((position) => {
+    form.elements.latitude.value = String(position.coords.latitude);
+    form.elements.longitude.value = String(position.coords.longitude);
+    form.elements.locationAccuracy.value = String(position.coords.accuracy);
+    status.textContent = `Localização capturada (precisão aproximada de ${Math.round(position.coords.accuracy)} m).`;
+    button.disabled = false;
+  }, (error) => {
+    status.textContent = error.code === error.PERMISSION_DENIED
+      ? 'Permissão negada. Você ainda pode registrar a visita sem localização.'
+      : error.code === error.TIMEOUT
+        ? 'Tempo esgotado ao obter a localização. Tente novamente ou continue sem ela.'
+        : 'Não foi possível obter a localização. Você ainda pode registrar a visita sem ela.';
+    button.disabled = false;
+  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+}
 
 function routeBuilderMarkup() {
   const today = new Date();
@@ -203,35 +257,17 @@ function optimizeStops() {
   app.showToast('Paradas reordenadas por proximidade; o trajeto é estimado em linha geográfica.');
 }
 
-function mapLocation(item) {
-  if (validPoint(item)) return `${Number(item.latitude)},${Number(item.longitude)}`;
-  return [item.address, item.city || item.cityName, item.state].filter(Boolean).join(', ');
-}
-
-function googleMapsLinks() {
-  const nodes = [
-    ...(validPoint(app.state.routeOrigin) ? [app.state.routeOrigin] : []),
-    ...app.state.routeStops,
-    ...(validPoint(app.state.routeDestination) ? [app.state.routeDestination] : []),
-  ];
-  if (nodes.length < 2) return [];
-  const locations = nodes.map(mapLocation);
-  if (locations.some((location) => !location)) return [];
-  const links = [];
-  let start = 0;
-  while (start < locations.length - 1) {
-    const end = Math.min(start + 4, locations.length - 1);
-    const url = new URL('https://www.google.com/maps/dir/');
-    url.searchParams.set('api', '1');
-    url.searchParams.set('origin', locations[start]);
-    url.searchParams.set('destination', locations[end]);
-    url.searchParams.set('travelmode', 'driving');
-    const waypoints = locations.slice(start + 1, end);
-    if (waypoints.length) url.searchParams.set('waypoints', waypoints.join('|'));
-    links.push(url.toString());
-    start = end;
+function wazeUrl(stop) {
+  const params = new URLSearchParams({ navigate: 'yes', utm_source: 'radar_comercial' });
+  if (validPoint(stop)) {
+    params.set('ll', `${Number(stop.latitude)},${Number(stop.longitude)}`);
+  } else {
+    const query = [stop.companyName || stop.name, stop.address, stop.city || stop.cityName, stop.state]
+      .filter(Boolean).join(', ');
+    if (!query) throw new Error(`Não há endereço ou coordenadas para ${stop.name || 'esta parada'}.`);
+    params.set('q', query);
   }
-  return links;
+  return `https://waze.com/ul?${params.toString()}`;
 }
 
 function shareRoute() {
@@ -239,22 +275,20 @@ function shareRoute() {
     app.showToast('Adicione paradas antes de compartilhar.');
     return;
   }
-  const links = googleMapsLinks();
   const lines = [
     `Rota: ${$('#routeName').value.trim() || 'Radar Comercial'}`,
     $('#routeDate').value ? `Data: ${$('#routeDate').value}` : '',
     app.state.routeOrigin ? `Saída: ${app.state.routeOrigin.name}` : '',
     '',
+    'Abra cada link do Waze na ordem indicada para seguir para a próxima parada.',
+    '',
     ...app.state.routeStops.flatMap((stop, index) => [
-      `${index + 1}. ${stop.name}`,
+      `${index + 1} - ${stop.name}`,
       [stop.address, stop.city || stop.cityName, stop.state].filter(Boolean).join(', '),
+      `Waze: ${wazeUrl(stop)}`,
+      '',
     ]),
     app.state.routeDestination ? `Chegada: ${app.state.routeDestination.name}` : '',
-    '',
-    ...(links.length
-      ? [links.length === 1 ? 'Navegar pela rota no Google Maps:' : 'Navegar por trechos no Google Maps:',
-        ...links.map((link, index) => links.length === 1 ? link : `Trecho ${index + 1}: ${link}`)]
-      : ['Waze — primeira parada:', `https://waze.com/ul?${new URLSearchParams({ navigate: 'yes', q: mapLocation(app.state.routeStops[0]) })}`]),
   ].filter(Boolean);
   window.open(`https://wa.me/?text=${encodeURIComponent(lines.join('\n'))}`, '_blank', 'noopener');
 }
@@ -399,7 +433,18 @@ document.addEventListener('click', async (event) => {
   const featureAction = event.target.closest('[data-feature-action]')?.dataset.featureAction;
   const routeAction = event.target.closest('[data-route-action]')?.dataset.routeAction;
   const mainAction = event.target.closest('[data-action]')?.dataset.action;
+  const visitAction = event.target.closest('[data-visit-action]')?.dataset.visitAction;
   if (!app) return;
+  if (mainAction === 'register-visit') {
+    window.setTimeout(installVisitCaptureFields, 0);
+    return;
+  }
+  if (visitAction) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (visitAction === 'capture-location') captureVisitLocation(event.target.closest('button'));
+    return;
+  }
   if (featureAction || routeAction || ['share-whatsapp', 'optimize-route', 'add-route-stop'].includes(mainAction)) {
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -459,6 +504,21 @@ document.addEventListener('click', async (event) => {
   }
 }, true);
 
+document.addEventListener('change', (event) => {
+  if (event.target.id !== 'visitPhotoInput') return;
+  const file = event.target.files?.[0];
+  const status = $('#visitPhotoStatus');
+  if (!file) return;
+  if (file.size > MAX_VISIT_PHOTO_BYTES) {
+    event.target.value = '';
+    status.textContent = 'A foto excede o limite de 5 MB. Selecione uma imagem menor.';
+    return;
+  }
+  status.textContent = file.type
+    ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB`
+    : 'Tipo de arquivo não reconhecido. Selecione JPG, PNG ou WebP.';
+}, true);
+
 document.addEventListener('input', (event) => {
   if (!app) return;
   if (event.target.id === 'routeCandidateSearch') {
@@ -473,6 +533,49 @@ document.addEventListener('input', (event) => {
     app.state.routeDestination = null;
     saveEndpoints();
     app.renderRouteMap();
+  }
+}, true);
+
+document.addEventListener('submit', async (event) => {
+  const form = event.target;
+  if (form.id !== 'visitForm') return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const button = form.querySelector('button[type="submit"]');
+  const values = new FormData(form);
+  const companyName = String(values.get('company') || '').trim();
+  const prospect = app.prospects.find((item) => item.name === companyName);
+  const photo = values.get('photo');
+  if (photo?.size > MAX_VISIT_PHOTO_BYTES) {
+    app.showToast('A foto deve ter no máximo 5 MB.');
+    return;
+  }
+  if (photo?.size && !['image/jpeg', 'image/png', 'image/webp'].includes(photo.type)) {
+    app.showToast('A foto deve estar no formato JPG, PNG ou WebP.');
+    return;
+  }
+  const submission = new FormData();
+  submission.append('prospectId', prospect?.id || '');
+  submission.append('companyName', companyName);
+  submission.append('city', prospect?.cityName || '');
+  submission.append('result', String(values.get('result') || ''));
+  submission.append('nextAction', String(values.get('next') || ''));
+  submission.append('notes', String(values.get('notes') || ''));
+  submission.append('latitude', String(values.get('latitude') || ''));
+  submission.append('longitude', String(values.get('longitude') || ''));
+  submission.append('locationAccuracy', String(values.get('locationAccuracy') || ''));
+  if (photo?.size) submission.append('photo', photo, photo.name);
+  button.disabled = true;
+  try {
+    await app.api('/api/visits', { method: 'POST', body: submission });
+    app.closeModal();
+    await app.loadLiveData();
+    app.setView('visits');
+    app.showToast('Visita registrada com sucesso.');
+  } catch (error) {
+    app.showToast(error.message);
+  } finally {
+    button.disabled = false;
   }
 }, true);
 

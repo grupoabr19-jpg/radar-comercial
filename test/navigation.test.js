@@ -14,14 +14,19 @@ test('usa endereço quando não há coordenadas', () => {
   assert.equal(url.searchParams.get('q'), 'Av. Paulista, 1000, São Paulo, SP');
 });
 
-test('gera mensagem de WhatsApp com um link por trecho', () => {
+test('gera uma mensagem de WhatsApp com links Waze por parada em ordem', () => {
   const result = buildRouteShare({ name: 'Eixo Norte', route_date: '2026-10-24' }, [
     { company_name: 'Cliente A', latitude: -22.9, longitude: -47.1 },
     { company_name: 'Cliente B', address: 'Rua B, 20', city: 'Sumaré', state: 'SP' },
   ]);
-  assert.match(result.message, /1\. Cliente A/);
-  assert.match(result.message, /2\. Cliente B/);
-  assert.equal((result.message.match(/https:\/\/waze\.com\/ul/g) || []).length, 2);
+  assert.match(result.message, /1 - Cliente A/);
+  assert.match(result.message, /2 - Cliente B/);
+  const links = [...result.message.matchAll(/Waze: (https:\/\/waze\.com\/ul\?[^\s]+)/g)]
+    .map((match) => new URL(match[1]));
+  assert.equal(links.length, 2);
+  assert.equal(links[0].searchParams.get('ll'), '-22.9,-47.1');
+  assert.equal(links[1].searchParams.get('q'), 'Cliente B, Rua B, 20, Sumaré, SP');
+  assert.ok(result.message.indexOf('Waze: ') < result.message.indexOf('2 - Cliente B'));
   assert.match(result.whatsappUrl, /^https:\/\/wa\.me\/\?text=/);
 });
 

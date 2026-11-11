@@ -11,7 +11,8 @@ export function buildWazeUrl(stop) {
   if (validCoordinate(stop.latitude, -90, 90) && validCoordinate(stop.longitude, -180, 180)) {
     params.set('ll', `${Number(stop.latitude)},${Number(stop.longitude)}`);
   } else {
-    const query = [stop.address, stop.city, stop.state].filter(Boolean).join(', ');
+    const query = [stop.company_name || stop.trade_name, stop.address, stop.city, stop.state]
+      .filter(Boolean).join(', ');
     if (!query) throw new Error('A parada precisa de coordenadas ou endereço.');
     params.set('q', query);
   }
@@ -20,62 +21,19 @@ export function buildWazeUrl(stop) {
 
 export function buildRouteShare(route, stops) {
   if (!stops.length) throw new Error('A rota não possui paradas.');
-  const routeNodes = [
-    route.origin_name || route.origin_city || route.origin_latitude != null
-      ? { name: route.origin_name || route.origin_city || 'Saída', city: route.origin_city, state: route.origin_state, latitude: route.origin_latitude, longitude: route.origin_longitude }
-      : null,
-    ...stops,
-    route.destination_name || route.destination_city || route.destination_latitude != null
-      ? { name: route.destination_name || route.destination_city || 'Destino', city: route.destination_city, state: route.destination_state, latitude: route.destination_latitude, longitude: route.destination_longitude }
-      : null,
-  ].filter(Boolean);
-  const mapLinks = buildGoogleMapsLinks(routeNodes);
   const lines = [`Rota: ${route.name}`, route.route_date ? `Data: ${route.route_date}` : '', ''];
   if (route.origin_name || route.origin_city) lines.push(`Saída: ${route.origin_name || route.origin_city}`);
+  lines.push('Abra cada link do Waze na ordem indicada para seguir para a próxima parada.', '');
   stops.forEach((stop, index) => {
-    lines.push(`${index + 1}. ${stop.company_name}`);
+    lines.push(`${index + 1} - ${stop.company_name}`);
     const location = [stop.address, stop.city, stop.state].filter(Boolean).join(', ');
     if (location) lines.push(location);
+    lines.push(`Waze: ${buildWazeUrl(stop)}`);
     lines.push('');
   });
   if (route.destination_name || route.destination_city) lines.push(`Chegada: ${route.destination_name || route.destination_city}`);
-  if (mapLinks.length) {
-    lines.push('', mapLinks.length === 1 ? 'Navegar pela rota no Google Maps:' : 'Navegar por trechos no Google Maps:');
-    mapLinks.forEach((link, index) => lines.push(mapLinks.length === 1 ? link : `Trecho ${index + 1}: ${link}`));
-  } else {
-    lines.push('', 'Links do Waze por parada:');
-    stops.forEach((stop, index) => lines.push(`${index + 1}. ${buildWazeUrl(stop)}`));
-  }
   const message = lines.filter((line, index) => line || lines[index - 1]).join('\n').trim();
   return { message, whatsappUrl: `https://wa.me/?text=${encodeURIComponent(message)}` };
-}
-
-function routeLocation(item) {
-  if (validCoordinate(item.latitude, -90, 90) && validCoordinate(item.longitude, -180, 180)) {
-    return `${Number(item.latitude)},${Number(item.longitude)}`;
-  }
-  return [item.address, item.city, item.state].filter(Boolean).join(', ');
-}
-
-function buildGoogleMapsLinks(nodes) {
-  if (nodes.length < 2) return [];
-  const locations = nodes.map(routeLocation);
-  if (locations.some((location) => !location)) return [];
-  const links = [];
-  let start = 0;
-  while (start < locations.length - 1) {
-    const end = Math.min(start + 4, locations.length - 1);
-    const url = new URL('https://www.google.com/maps/dir/');
-    url.searchParams.set('api', '1');
-    url.searchParams.set('origin', locations[start]);
-    url.searchParams.set('destination', locations[end]);
-    url.searchParams.set('travelmode', 'driving');
-    const waypoints = locations.slice(start + 1, end);
-    if (waypoints.length) url.searchParams.set('waypoints', waypoints.join('|'));
-    links.push(url.toString());
-    start = end;
-  }
-  return links;
 }
 
 export function haversineKm(lat1, lon1, lat2, lon2) {
