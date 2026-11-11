@@ -1,0 +1,30 @@
+.route-builder{margin:0 0 16px;padding-bottom:18px}
+.route-builder>.panel-header{margin-bottom:14px}
+.route-builder-help{margin:10px 20px;color:var(--muted);font-size:11px;line-height:1.55}
+.route-endpoints,.route-builder-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:0 20px}
+.route-endpoints label,.route-builder-controls label,.segment-mapping-form label{display:flex;flex-direction:column;gap:6px;color:#59627b;font-size:10px;font-weight:700}
+.route-endpoints input,.route-builder-controls input,.route-candidate-search input,.segment-mapping-form input,.segment-mapping-form select{min-width:0;height:39px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:#fff;color:var(--ink);font:500 12px "Montserrat",sans-serif}
+.route-builder-controls{grid-template-columns:1.4fr 1fr 1fr 1fr auto;margin-top:12px;align-items:end}
+.route-builder-controls button{white-space:nowrap}
+.route-suggestions{display:grid;gap:8px;padding:0 20px}
+.route-suggestion{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--line);border-radius:9px;padding:11px 12px;background:#fafbfe}
+.route-suggestion>div{min-width:0}
+.route-suggestion strong{font-size:11px}
+.route-suggestion p,.route-suggestion small{display:block;margin:4px 0 0;color:var(--muted);font-size:9px;line-height:1.4}
+.route-suggestion small+small{display:inline-block;margin-left:6px}
+.route-suggestion button{flex:none}
+.route-candidate-search{display:grid;gap:8px;margin:17px 20px 0}
+.route-candidate-search>label{color:#59627b;font-size:10px;font-weight:700}
+.route-builder-footer{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px 0}
+.route-error{color:#a53838;font-size:11px}
+.market-marker-tooltip{max-width:290px;white-space:normal;line-height:1.55;color:var(--ink);border:1px solid #dfe3ed;border-radius:8px;box-shadow:0 6px 20px rgba(20,39,88,.13);font:500 10px/1.5 "Montserrat",sans-serif}
+.market-marker-tooltip strong{font-size:11px}
+.market-marker-tooltip span{font-weight:700}
+.segment-mapping-form{display:grid;grid-template-columns:minmax(150px,.7fr) minmax(260px,1.8fr) auto;gap:10px;align-items:end;margin:18px 0}
+.segment-mapping-form button{white-space:nowrap}
+.enrichment-status{margin:12px 0;color:var(--muted);font-size:11px;line-height:1.7}
+.segment-mapping-list{display:grid;gap:7px;max-height:300px;overflow:auto}
+.segment-mapping-row{display:grid;grid-template-columns:100px 1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:9px;font-size:10px}
+.segment-mapping-row small{color:var(--muted)}
+@media(max-width:900px){.route-builder-controls{grid-template-columns:repeat(2,minmax(0,1fr))}.route-builder-controls button{grid-column:span 2}}
+@media(max-width:600px){.route-endpoints{grid-template-columns:1fr 72px}.route-endpoints label:nth-child(3){grid-column:1}.route-endpoints label:nth-child(4){grid-column:2;grid-row:2}.route-suggestion{align-items:flex-start;flex-direction:column}.route-suggestion button{width:100%}.segment-mapping-form{grid-template-columns:1fr}.segment-mapping-row{grid-template-columns:1fr}.route-builder-footer{flex-direction:column}.route-builder-footer button{width:100%}}

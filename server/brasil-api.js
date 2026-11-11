@@ -3,6 +3,11 @@ const TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_CACHE_ITEMS = 500;
 
 function digits(value) { return String(value || '').replace(/\D/g, ''); }
+function cnaeCode(value) {
+  const code = String(value ?? '').replace(/\D/g, '');
+  const normalized = code.length === 6 ? `0${code}` : code;
+  return /^\d{7}$/.test(normalized) ? normalized : null;
+}
 
 async function fetchBrasilApi(path) {
   const cached = cache.get(path);
@@ -11,7 +16,14 @@ async function fetchBrasilApi(path) {
     headers: { Accept: 'application/json', 'User-Agent': 'Radar-Comercial-Grupo-ABR/1.0' },
     signal: AbortSignal.timeout(8_000),
   });
-  const value = await response.json().catch(() => ({}));
+  let value;
+  try {
+    value = await response.json();
+  } catch {
+    const error = new Error('BrasilAPI retornou uma resposta JSON inválida.');
+    error.status = 503;
+    throw error;
+  }
   if (!response.ok) {
     const error = new Error(value.message || `BrasilAPI indisponível (${response.status}).`);
     error.status = response.status === 404 ? 404 : response.status === 400 ? 400 : 503;
@@ -33,14 +45,20 @@ export async function lookupCnpj(value) {
   const cnpj = digits(value);
   if (cnpj.length !== 14) { const error = new Error('CNPJ deve conter 14 dígitos.'); error.status = 400; throw error; }
   const result = await fetchBrasilApi(`cnpj/v1/${cnpj}`);
+  const secondaryCnaes = (Array.isArray(result.cnaes_secundarios) ? result.cnaes_secundarios : [])
+    .map((item) => ({
+      code: cnaeCode(item.codigo),
+      description: item.descricao || null,
+    }))
+    .filter((item) => item.code);
   return {
     cnpj: result.cnpj, companyName: result.razao_social, tradeName: result.nome_fantasia,
     status: result.descricao_situacao_cadastral, size: result.porte,
-    cnae: result.cnae_fiscal, activity: result.cnae_fiscal_descricao,
+    cnae: cnaeCode(result.cnae_fiscal), activity: result.cnae_fiscal_descricao,
+    secondaryCnaes,
     postalCode: result.cep, state: result.uf, city: result.municipio,
     address: [result.descricao_tipo_de_logradouro, result.logradouro, result.numero, result.complemento, result.bairro].filter(Boolean).join(', '),
     phone: result.ddd_telefone_1 || null, email: result.email || null,
     ibgeCity: result.codigo_municipio_ibge, source: 'BrasilAPI/CNPJ',
   };
 }
-

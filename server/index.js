@@ -9,10 +9,12 @@ import { getPool, query } from './db.js';
 import { migrate } from './migrate.js';
 import { parseRetailRouteMatrix, parseWorkbook, persistImport } from './importer.js';
 import { downloadGoogleSpreadsheet } from './google-sheet.js';
-import { buildRouteShare, buildWazeUrl, haversineKm } from './navigation.js';
+import { buildRouteShare, buildWazeUrl, distanceToRouteKm, haversineKm, orderStopsByProximity } from './navigation.js';
 import { syncGoogleSheet } from './sheet-sync.js';
 import { lookupCep, lookupCnpj } from './brasil-api.js';
 import { findMunicipality } from './municipalities.js';
+import { enrichCustomersCnae } from './cnae-enrichment.js';
+import { listSegments, reconcileReferenceSegmentMappings, reviewCnaeSegment } from './segments.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const defaultGoogleSheetUrl = 'https://docs.google.com/spreadsheets/d/18WarJapxqvW4s61k5rjE4qTGsDorr29rJ9QkOG0IO2M/edit';
@@ -61,6 +63,60 @@ app.get('/api/auth/session', (req, res) => {
 
 app.use('/api', requireApiAuth);
 
+function normalizeRouteEndpoint(value, label) {
+  if (!value || typeof value !== 'object') return null;
+  const city = String(value.city || '').trim();
+  const state = String(value.state || '').trim().toUpperCase();
+  const municipality = city && state ? findMunicipality(city, state) : null;
+  const hasLatitude = value.latitude != null;
+  const hasLongitude = value.longitude != null;
+  if (hasLatitude !== hasLongitude) {
+    const error = new Error(`${label} deve informar latitude e longitude juntas.`);
+    error.status = 400;
+    throw error;
+  }
+  const latitude = hasLatitude ? Number(value.latitude) : municipality?.latitude;
+  const longitude = hasLongitude ? Number(value.longitude) : municipality?.longitude;
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90
+    || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    const error = new Error(`${label} precisa de coordenadas válidas ou de uma cidade e UF reconhecidas.`);
+    error.status = 400;
+    throw error;
+  }
+  return {
+    name: String(value.name || city || label).trim().slice(0, 120),
+    city: city || municipality?.city || null,
+    state: state || municipality?.state || null,
+    latitude,
+    longitude,
+  };
+}
+
+function routeCandidateFromRow(row) {
+  return {
+    id: `${row.kind}-${row.entity_id}`,
+    entityId: row.entity_id,
+    customerId: row.customer_id,
+    prospectId: row.prospect_id,
+    kind: row.kind,
+    name: row.trade_name || row.company_name,
+    tradeName: row.trade_name,
+    companyName: row.company_name,
+    address: row.address,
+    city: row.city,
+    cityName: row.city,
+    state: row.state,
+    latitude: row.latitude == null ? null : Number(row.latitude),
+    longitude: row.longitude == null ? null : Number(row.longitude),
+    cnpj: row.cnpj,
+    portfolioStatus: row.portfolio_status,
+    status: row.status,
+    macroSegment: row.macro_segment,
+    microSegment: row.micro_segment,
+    locationAccuracy: row.location_accuracy,
+  };
+}
+
 app.get('/api/dashboard', async (_req, res, next) => {
   try {
     const result = await query(`SELECT
@@ -72,10 +128,12 @@ app.get('/api/dashboard', async (_req, res, next) => {
       WHERE visited_at >= date_trunc('month', now())`);
     const operational = await query(`SELECT
       (SELECT count(*)::int FROM erp_customers) AS customers,
-      (SELECT count(*)::int FROM erp_customers WHERE primary_cnae IS NOT NULL) AS customers_with_cnae,
+      (SELECT count(*)::int FROM company_cnaes) AS customers_with_cnae,
       (SELECT count(*)::int FROM prospecting_cnaes WHERE enabled) AS target_cnaes,
       (SELECT count(*)::int FROM prospecting_cnaes WHERE review_status='pending') AS pending_cnaes,
       (SELECT count(DISTINCT candidate_cnae)::int FROM prospecting_cnae_matches WHERE enabled) AS related_cnaes,
+      (SELECT count(*)::int FROM cnae_segment_mappings WHERE review_status='approved') AS cnae_segment_mappings,
+      (SELECT count(*)::int FROM erp_customers WHERE primary_cnae IS NULL AND cnae_enrichment_error IS NOT NULL) AS cnae_enrichment_failures,
       (SELECT count(*)::int FROM route_regions WHERE source_batch_id IS NOT NULL) AS synced_regions,
       (SELECT count(*)::int FROM region_cities WHERE source_name='google_sheet_varejo') AS mapped_cities,
       (SELECT max(completed_at) FROM import_batches WHERE status='completed') AS last_sync,
@@ -92,10 +150,14 @@ app.get('/api/prospects', async (req, res, next) => {
     const where = ["status <> 'do_not_contact'"];
     if (req.query.q) { values.push(`%${req.query.q}%`); where.push(`(company_name ILIKE $${values.length} OR city ILIKE $${values.length} OR cnpj ILIKE $${values.length})`); }
     if (req.query.priority) { values.push(req.query.priority); where.push(`priority = $${values.length}`); }
-    const result = await query(`SELECT id, company_name, trade_name, cnpj, primary_cnae, cnae_description,
+    const result = await query(`SELECT p.id, p.company_name, p.trade_name, p.cnpj, p.primary_cnae, p.cnae_description,
       segment, city, state, address, latitude, longitude, status, priority, score, confidence, potential_min, potential_max,
-      product_families, score_reasons, source_name, assigned_to, updated_at
-      FROM prospects WHERE ${where.join(' AND ')} ORDER BY score DESC, updated_at DESC LIMIT 500`, values);
+      product_families, score_reasons, source_name, assigned_to, p.updated_at,
+      macro.name AS macro_segment, micro.name AS micro_segment
+      FROM prospects p
+      LEFT JOIN macro_segments macro ON macro.id=p.macro_segment_id
+      LEFT JOIN micro_segments micro ON micro.id=p.micro_segment_id
+      WHERE ${where.join(' AND ')} ORDER BY score DESC, p.updated_at DESC LIMIT 500`, values);
     res.json(result.rows);
   } catch (error) { next(error); }
 });
@@ -112,13 +174,16 @@ app.get('/api/customers', async (req, res, next) => {
         OR coalesce(c.cnpj,'') ILIKE $${values.length} OR coalesce(c.city,'') ILIKE $${values.length})`);
     }
     values.push(limit);
-    const result = await query(`SELECT c.id,c.customer_code,c.cnpj,c.company_name,c.city,c.state,c.address,
-      c.days_since_last_sale,c.purchase_age_band,c.seller_name,m.latitude,m.longitude,
+    const result = await query(`SELECT c.id,c.customer_code,c.cnpj,c.company_name,c.trade_name,c.primary_cnae,
+      c.primary_cnae_description,macro.name AS macro_segment,micro.name AS micro_segment,
+      c.city,c.state,c.address,c.days_since_last_sale,c.purchase_age_band,c.seller_name,m.latitude,m.longitude,
       CASE WHEN lower(coalesce(c.purchase_age_band,''))='sem venda' THEN 'inactive'
         WHEN c.days_since_last_sale < 90 THEN 'active'
         WHEN c.days_since_last_sale >= 90 THEN 'inactive' ELSE 'unknown' END AS portfolio_status
       FROM erp_customers c
       LEFT JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(c.city)) AND m.state=c.state
+      LEFT JOIN macro_segments macro ON macro.id=c.macro_segment_id
+      LEFT JOIN micro_segments micro ON micro.id=c.micro_segment_id
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY CASE WHEN c.days_since_last_sale < 90 THEN 0 ELSE 1 END,c.company_name
       LIMIT $${values.length}`, values);
@@ -147,12 +212,16 @@ app.get('/api/customers/map', async (req, res, next) => {
           WHERE lower(btrim(rc.city))=lower(btrim(c.city)) AND rc.state=c.state)`;
     }
     values.push(limit);
-    const result = await query(`SELECT c.id,c.customer_code,c.cnpj,c.company_name,c.city,c.state,c.address,
-      c.days_since_last_sale,c.purchase_age_band,c.seller_name,m.latitude,m.longitude,
+    const result = await query(`SELECT c.id,c.customer_code,c.cnpj,c.company_name,c.trade_name,c.primary_cnae,
+      c.primary_cnae_description,macro.name AS macro_segment,micro.name AS micro_segment,
+      c.city,c.state,c.address,c.days_since_last_sale,c.purchase_age_band,c.seller_name,m.latitude,m.longitude,
       CASE WHEN lower(coalesce(c.purchase_age_band,''))='sem venda' THEN 'inactive'
         WHEN c.days_since_last_sale < 90 THEN 'active'
         WHEN c.days_since_last_sale >= 90 THEN 'inactive' ELSE 'unknown' END AS portfolio_status
-      FROM erp_customers c ${coverageJoin}
+      FROM erp_customers c
+      LEFT JOIN macro_segments macro ON macro.id=c.macro_segment_id
+      LEFT JOIN micro_segments micro ON micro.id=c.micro_segment_id
+      ${coverageJoin}
       ORDER BY CASE WHEN c.days_since_last_sale < 90 THEN 0 ELSE 1 END,c.company_name
       LIMIT $${values.length}`, values);
     res.json({ rows: result.rows, limit, truncated: result.rowCount === limit, locationAccuracy: 'municipality_center' });
@@ -192,6 +261,62 @@ app.patch('/api/cnaes/:cnae', async (req, res, next) => {
       VALUES ($1,'review_cnae','prospecting_cnae',$2,$3)`,
     [req.user.email, cnae, { reviewStatus, reviewNotes }]);
     res.json(result.rows[0]);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/segments', async (_req, res, next) => {
+  try { res.json(await listSegments()); } catch (error) { next(error); }
+});
+
+app.post('/api/segments/reconcile', async (req, res, next) => {
+  try {
+    const result = await reconcileReferenceSegmentMappings();
+    await query(`INSERT INTO audit_events(actor_email,action,entity_type,metadata)
+      VALUES ($1,'reconcile_reference_segments','cnae_segment_mapping',$2)`,
+    [req.user.email, result]);
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.put('/api/segments/cnae-mappings/:cnae', async (req, res, next) => {
+  try {
+    const cnae = String(req.params.cnae || '').replace(/\D/g, '');
+    const microSegmentId = Number(req.body.microSegmentId);
+    if (!/^\d{7}$/.test(cnae)) return res.status(400).json({ error: 'CNAE deve conter 7 dígitos.' });
+    if (!Number.isSafeInteger(microSegmentId) || microSegmentId < 1) {
+      return res.status(400).json({ error: 'Selecione um microssegmento válido.' });
+    }
+    res.json(await reviewCnaeSegment({ cnae, microSegmentId, actorEmail: req.user.email }));
+  } catch (error) { next(error); }
+});
+
+app.get('/api/enrichment/cnae/status', async (_req, res, next) => {
+  try {
+    const result = await query(`SELECT
+      count(*) FILTER (WHERE company.company_id IS NOT NULL AND company.source_name<>'erp_existing')::int AS enriched,
+      count(*) FILTER (WHERE (company.company_id IS NULL OR company.source_name='erp_existing')
+        AND customer.cnpj IS NOT NULL
+        AND length(regexp_replace(customer.cnpj,'\\D','','g'))=14
+        AND customer.cnae_enrichment_error IS NULL)::int AS pending,
+      count(*) FILTER (WHERE (company.company_id IS NULL OR company.source_name='erp_existing')
+        AND customer.cnae_enrichment_error IS NOT NULL)::int AS failed,
+      count(*) FILTER (WHERE (company.company_id IS NULL OR company.source_name='erp_existing')
+        AND (customer.cnpj IS NULL OR length(regexp_replace(customer.cnpj,'\\D','','g'))<>14))::int AS missing_cnpj
+      FROM erp_customers customer
+      LEFT JOIN company_cnaes company ON company.company_id=customer.id`);
+    res.json(result.rows[0]);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/enrichment/cnae', async (req, res, next) => {
+  try {
+    const limit = req.body.limit == null ? 5 : Number(req.body.limit);
+    const result = await enrichCustomersCnae({
+      limit,
+      retryErrors: req.body.retryErrors === true,
+      actorEmail: req.user.email,
+    });
+    res.json(result);
   } catch (error) { next(error); }
 });
 
@@ -363,30 +488,145 @@ app.get('/api/regions', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get('/api/route-candidates', async (req, res, next) => {
+  try {
+    const term = String(req.query.q || '').trim();
+    if (term.length < 2) return res.status(400).json({ error: 'Informe ao menos 2 caracteres para pesquisar.' });
+    const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 15));
+    const result = await query(`SELECT * FROM (
+      SELECT c.id::text AS entity_id,c.id AS customer_id,NULL::uuid AS prospect_id,'customer'::text AS kind,
+        c.company_name,c.trade_name,c.cnpj,c.address,c.city,c.state,m.latitude,m.longitude,
+        CASE WHEN lower(coalesce(c.purchase_age_band,''))='sem venda' OR c.days_since_last_sale>=90
+          THEN 'inactive' ELSE 'unknown' END AS portfolio_status,
+        NULL::text AS status,macro.name AS macro_segment,micro.name AS micro_segment,
+        'municipality_center'::text AS location_accuracy
+      FROM erp_customers c
+      LEFT JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(c.city)) AND m.state=c.state
+      LEFT JOIN macro_segments macro ON macro.id=c.macro_segment_id
+      LEFT JOIN micro_segments micro ON micro.id=c.micro_segment_id
+      WHERE (c.company_name ILIKE $1 OR coalesce(c.trade_name,'') ILIKE $1
+        OR coalesce(c.customer_code,'') ILIKE $1 OR coalesce(c.cnpj,'') ILIKE $1
+        OR coalesce(c.city,'') ILIKE $1)
+      UNION ALL
+      SELECT p.id::text AS entity_id,NULL::uuid AS customer_id,p.id AS prospect_id,'prospect'::text AS kind,
+        p.company_name,p.trade_name,p.cnpj,p.address,p.city,p.state,
+        coalesce(p.latitude,m.latitude) AS latitude,coalesce(p.longitude,m.longitude) AS longitude,
+        NULL::text AS portfolio_status,p.status,macro.name AS macro_segment,micro.name AS micro_segment,
+        CASE WHEN p.latitude IS NULL OR p.longitude IS NULL THEN 'municipality_center' ELSE 'company' END AS location_accuracy
+      FROM prospects p
+      LEFT JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(p.city)) AND m.state=p.state
+      LEFT JOIN macro_segments macro ON macro.id=p.macro_segment_id
+      LEFT JOIN micro_segments micro ON micro.id=p.micro_segment_id
+      WHERE p.status NOT IN ('won','lost','do_not_contact')
+        AND NOT EXISTS (SELECT 1 FROM erp_customers c WHERE c.cnpj=p.cnpj AND c.cnpj IS NOT NULL)
+        AND (p.company_name ILIKE $1 OR coalesce(p.trade_name,'') ILIKE $1
+          OR coalesce(p.cnpj,'') ILIKE $1 OR coalesce(p.city,'') ILIKE $1)
+    ) candidates
+    ORDER BY CASE kind WHEN 'prospect' THEN 0 ELSE 1 END,company_name
+    LIMIT $2`, [`%${term}%`, limit]);
+    res.json(result.rows.map(routeCandidateFromRow));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/routes/suggestions', async (req, res, next) => {
+  try {
+    const origin = normalizeRouteEndpoint(req.body.origin, 'Ponto de saída');
+    const destination = normalizeRouteEndpoint(req.body.destination, 'Ponto final');
+    if (!origin || !destination) {
+      return res.status(400).json({ error: 'Informe ponto de saída e ponto final com cidade/UF ou coordenadas.' });
+    }
+    const requestedRadius = req.body.corridorKm == null ? 15 : Number(req.body.corridorKm);
+    if (!Number.isFinite(requestedRadius) || requestedRadius < 1 || requestedRadius > 50) {
+      return res.status(400).json({ error: 'A área do trajeto deve estar entre 1 e 50 km.' });
+    }
+    const requestedLimit = req.body.maxStops == null ? 20 : Number(req.body.maxStops);
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
+      return res.status(400).json({ error: 'O limite deve estar entre 1 e 50 paradas.' });
+    }
+    const result = await query(`SELECT * FROM (
+      SELECT c.id::text AS entity_id,c.id AS customer_id,NULL::uuid AS prospect_id,'customer'::text AS kind,
+        c.company_name,c.trade_name,c.cnpj,c.address,c.city,c.state,m.latitude,m.longitude,
+        'inactive'::text AS portfolio_status,NULL::text AS status,
+        macro.name AS macro_segment,micro.name AS micro_segment,'municipality_center'::text AS location_accuracy
+      FROM erp_customers c
+      JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(c.city)) AND m.state=c.state
+      LEFT JOIN macro_segments macro ON macro.id=c.macro_segment_id
+      LEFT JOIN micro_segments micro ON micro.id=c.micro_segment_id
+      WHERE (lower(coalesce(c.purchase_age_band,''))='sem venda' OR c.days_since_last_sale>=90)
+      UNION ALL
+      SELECT p.id::text AS entity_id,NULL::uuid AS customer_id,p.id AS prospect_id,'prospect'::text AS kind,
+        p.company_name,p.trade_name,p.cnpj,p.address,p.city,p.state,
+        coalesce(p.latitude,m.latitude) AS latitude,coalesce(p.longitude,m.longitude) AS longitude,
+        NULL::text AS portfolio_status,p.status,macro.name AS macro_segment,micro.name AS micro_segment,
+        CASE WHEN p.latitude IS NULL OR p.longitude IS NULL THEN 'municipality_center' ELSE 'company' END AS location_accuracy
+      FROM prospects p
+      LEFT JOIN municipalities m ON lower(btrim(m.city))=lower(btrim(p.city)) AND m.state=p.state
+      LEFT JOIN macro_segments macro ON macro.id=p.macro_segment_id
+      LEFT JOIN micro_segments micro ON micro.id=p.micro_segment_id
+      WHERE p.status NOT IN ('won','lost','do_not_contact')
+        AND NOT EXISTS (SELECT 1 FROM erp_customers c WHERE c.cnpj=p.cnpj AND c.cnpj IS NOT NULL)
+    ) candidates
+    WHERE latitude IS NOT NULL AND longitude IS NOT NULL`);
+    const suggestions = result.rows.flatMap((row) => {
+      const position = distanceToRouteKm(row, origin, destination);
+      if (!position || position.distanceKm > requestedRadius) return [];
+      return [{ ...routeCandidateFromRow(row),
+        distanceFromRouteKm: Number(position.distanceKm.toFixed(1)),
+        alongRouteKm: Number(position.alongRouteKm.toFixed(1)) }];
+    }).sort((left, right) => {
+      const kindOrder = (left.kind === 'prospect' ? 0 : 1) - (right.kind === 'prospect' ? 0 : 1);
+      return kindOrder || left.alongRouteKm - right.alongRouteKm
+        || left.distanceFromRouteKm - right.distanceFromRouteKm;
+    }).slice(0, requestedLimit);
+    res.json({
+      origin,
+      destination,
+      corridorKm: requestedRadius,
+      maxStops: requestedLimit,
+      locationAccuracy: 'municipality_center',
+      suggestions,
+    });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/routes', async (req, res, next) => {
   const client = await getPool().connect();
   try {
     const { name, routeDate, sellerName, regionId, stops = [] } = req.body;
     if (!name || !routeDate || !Array.isArray(stops) || !stops.length) return res.status(400).json({ error: 'Nome, data e ao menos uma parada são obrigatórios.' });
     if (stops.length > 50) return res.status(400).json({ error: 'Uma rota pode ter no máximo 50 paradas.' });
+    const origin = normalizeRouteEndpoint(req.body.origin, 'Ponto de saída');
+    const destination = normalizeRouteEndpoint(req.body.destination, 'Ponto final');
+    const orderedStops = orderStopsByProximity(stops, origin, destination);
     await client.query('BEGIN');
     const route = await client.query(`INSERT INTO planned_routes
-      (name, route_date, seller_name, region_id, status, created_by)
-      VALUES ($1,$2,$3,$4,'ready',$5) RETURNING *`, [name, routeDate, sellerName, regionId || null, req.user.email]);
-    for (const [index, stop] of stops.entries()) {
+      (name, route_date, seller_name, region_id, status, created_by,
+       origin_name,origin_city,origin_state,origin_latitude,origin_longitude,
+       destination_name,destination_city,destination_state,destination_latitude,destination_longitude)
+      VALUES ($1,$2,$3,$4,'ready',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+    [name, routeDate, sellerName, regionId || null, req.user.email,
+      origin?.name || null, origin?.city || null, origin?.state || null, origin?.latitude ?? null, origin?.longitude ?? null,
+      destination?.name || null, destination?.city || null, destination?.state || null,
+      destination?.latitude ?? null, destination?.longitude ?? null]);
+    for (const [index, stop] of orderedStops.entries()) {
       if (!stop.companyName) throw new Error(`A parada ${index + 1} não possui empresa.`);
       await client.query(`INSERT INTO route_stops
-        (route_id, sequence_number, prospect_id, company_name, address, city, state, latitude, longitude, appointment_at, planned_duration_minutes, notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [
-        route.rows[0].id, index + 1, stop.prospectId || null, stop.companyName, stop.address,
-        stop.city, stop.state, stop.latitude, stop.longitude, stop.appointmentAt || null,
-        stop.plannedDurationMinutes || 30, stop.notes,
+        (route_id, sequence_number, prospect_id, customer_id, company_name, address, city, state,
+         latitude, longitude, appointment_at, planned_duration_minutes, notes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [
+        route.rows[0].id, index + 1, stop.prospectId || null, stop.customerId || null,
+        stop.companyName, stop.address, stop.city, stop.state, stop.latitude, stop.longitude,
+        stop.appointmentAt || null, stop.plannedDurationMinutes || 30, stop.notes,
       ]);
     }
     await client.query('COMMIT');
     res.status(201).json({ id: route.rows[0].id });
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('Falha ao reverter a criação da rota:', rollbackError);
+    }
     next(error);
   } finally { client.release(); }
 });
@@ -441,4 +681,3 @@ if (process.env.GOOGLE_SHEET_URL && process.env.AUTO_SYNC_GOOGLE_SHEET !== 'fals
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => server.close(() => process.exit(0)));
 }
-
